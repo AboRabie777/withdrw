@@ -9,64 +9,94 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-/* ================= TON CONFIG ================= */
+/* ================== ENV CHECK ================== */
 
-if (
-  !process.env.TON_API_KEY ||
-  !process.env.TON_MNEMONIC ||
-  !process.env.TON_WALLET_ADDRESS
-) {
+const {
+  TON_API_KEY,
+  TON_MNEMONIC,
+  TON_WALLET_ADDRESS,
+  FIREBASE_DB_URL,
+} = process.env;
+
+if (!TON_API_KEY || !TON_MNEMONIC || !TON_WALLET_ADDRESS || !FIREBASE_DB_URL) {
   console.error("Missing required environment variables");
   process.exit(1);
 }
 
+/* ================== TON SETUP ================== */
+
 const tonweb = new TonWeb(
   new TonWeb.HttpProvider("https://toncenter.com/api/v2/jsonRPC", {
-    apiKey: process.env.TON_API_KEY,
+    apiKey: TON_API_KEY,
   })
 );
 
-const mnemonic = process.env.TON_MNEMONIC.trim().split(" ");
+const mnemonicWords = TON_MNEMONIC.trim().split(" ");
 
-if (mnemonic.length !== 12 && mnemonic.length !== 24) {
+if (mnemonicWords.length !== 12 && mnemonicWords.length !== 24) {
   console.error("Mnemonic must be 12 or 24 words");
   process.exit(1);
 }
 
-// اشتقاق المفاتيح
-const keyPair = await mnemonicToPrivateKey(mnemonic);
+const keyPair = await mnemonicToPrivateKey(mnemonicWords);
 
-// إنشاء Wallet v4R2
 const WalletClass = tonweb.wallet.all.v4R2;
 
 const wallet = new WalletClass(tonweb.provider, {
   publicKey: keyPair.publicKey,
-  address: process.env.TON_WALLET_ADDRESS, // مهم جدًا
 });
 
-/* ================= FIREBASE ================= */
+/* ================== ADDRESS VALIDATION ================== */
 
-const FIREBASE_URL = process.env.FIREBASE_DB_URL;
+const derivedAddress = await wallet.getAddress();
+const derivedString = derivedAddress.toString(true, true, true);
 
-/* ================= AUTO WITHDRAW ================= */
+console.log("Derived Address:", derivedString);
+console.log("Env Address:", TON_WALLET_ADDRESS);
+
+if (derivedString !== TON_WALLET_ADDRESS) {
+  console.error("❌ ERROR: Mnemonic does NOT match wallet address!");
+  process.exit(1);
+}
+
+/* ================== FIREBASE ================== */
+
+let isProcessing = false;
 
 async function processWithdrawals() {
+  if (isProcessing) return;
+  isProcessing = true;
+
   try {
-    const res = await fetch(`${FIREBASE_URL}/withdrawals.json`);
+    const res = await fetch(`${FIREBASE_DB_URL}/withdrawals.json`);
     const data = await res.json();
-    if (!data) return;
+    if (!data) {
+      isProcessing = false;
+      return;
+    }
 
     for (const id in data) {
       const w = data[id];
+
       if (w.status !== "pending") continue;
 
       console.log("Processing:", id);
+
+      // قفل العملية مؤقتًا
+      await fetch(`${FIREBASE_DB_URL}/withdrawals/${id}.json`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          status: "processing",
+          updatedAt: Date.now(),
+        }),
+      });
 
       const seqno = await wallet.methods.seqno().call();
 
       if (typeof seqno !== "number") {
         console.log("Wallet not deployed or seqno unavailable");
-        return;
+        continue;
       }
 
       await wallet.methods
@@ -79,8 +109,7 @@ async function processWithdrawals() {
         })
         .send();
 
-      // تحديث Firebase
-      await fetch(`${FIREBASE_URL}/withdrawals/${id}.json`, {
+      await fetch(`${FIREBASE_DB_URL}/withdrawals/${id}.json`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -89,25 +118,28 @@ async function processWithdrawals() {
         }),
       });
 
-      console.log("Completed:", id);
+      console.log("✅ Completed:", id);
     }
   } catch (err) {
     console.error("Auto withdraw error:", err);
   }
+
+  isProcessing = false;
 }
 
-// تشغيل كل 10 ثواني
+// كل 10 ثواني
 setInterval(processWithdrawals, 10000);
 
-/* ================= HEALTH CHECK ================= */
+/* ================== HEALTH ================== */
 
 app.get("/", (req, res) => {
-  res.send("Auto TON Withdraw Server Running");
+  res.send("TON Auto Withdraw Server Running");
 });
 
-/* ================= START ================= */
+/* ================== START ================== */
 
 const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
   console.log("Server running on port " + PORT);
 });
