@@ -1,15 +1,14 @@
 import express from "express";
 import TonWeb from "tonweb";
 import dotenv from "dotenv";
+import fetch from "node-fetch";
 
 dotenv.config();
 
 const app = express();
 app.use(express.json());
 
-/* ==============================
-   TON CONFIGURATION
-============================== */
+/* ================= TON SETUP ================= */
 
 const tonweb = new TonWeb(
   new TonWeb.HttpProvider("https://toncenter.com/api/v2/jsonRPC", {
@@ -17,90 +16,77 @@ const tonweb = new TonWeb(
   })
 );
 
-// تأكد إن عندك mnemonic
-if (!process.env.TON_MNEMONIC) {
-  console.error("TON_MNEMONIC is missing!");
-  process.exit(1);
-}
-
 const mnemonicWords = process.env.TON_MNEMONIC.trim().split(" ");
-
-if (mnemonicWords.length !== 24) {
-  console.error("Mnemonic must be 24 words");
-  process.exit(1);
-}
-
-// تحويل mnemonic إلى seed
 const seed = await TonWeb.mnemonic.mnemonicToSeed(mnemonicWords);
-
-// إنشاء keypair
 const keyPair = TonWeb.utils.keyPairFromSeed(seed);
 
-// استخدام Wallet v4R2
 const WalletClass = tonweb.wallet.all.v4R2;
-
 const wallet = new WalletClass(tonweb.provider, {
   publicKey: keyPair.publicKey,
 });
 
-/* ==============================
-   WITHDRAW ROUTE
-============================== */
+/* ================= FIREBASE ================= */
 
-app.post("/withdraw", async (req, res) => {
+const FIREBASE_URL = process.env.FIREBASE_DB_URL;
+
+/* ================= AUTO PROCESS ================= */
+
+async function processWithdrawals() {
   try {
-    const { address, amount } = req.body;
+    const res = await fetch(`${FIREBASE_URL}/withdrawals.json`);
+    const data = await res.json();
 
-    if (!address || !amount) {
-      return res.status(400).json({
-        error: "Missing address or amount",
+    if (!data) return;
+
+    for (const id in data) {
+      const w = data[id];
+
+      if (w.status !== "pending") continue;
+
+      console.log("Processing:", id);
+
+      const seqno = await wallet.methods.seqno().call();
+
+      const tx = await wallet.methods
+        .transfer({
+          secretKey: keyPair.secretKey,
+          toAddress: w.address,
+          amount: TonWeb.utils.toNano(w.netAmount.toString()),
+          seqno: seqno,
+          sendMode: 3,
+        })
+        .send();
+
+      // تحديث الحالة في Firebase
+      await fetch(`${FIREBASE_URL}/withdrawals/${id}.json`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          status: "completed",
+          txHash: tx,
+          updatedAt: Date.now(),
+        }),
       });
+
+      console.log("Completed:", id);
     }
-
-    const seqno = await wallet.methods.seqno().call();
-
-    if (seqno === null) {
-      return res.status(500).json({
-        error: "Wallet not deployed or no seqno",
-      });
-    }
-
-    await wallet.methods
-      .transfer({
-        secretKey: keyPair.secretKey,
-        toAddress: address,
-        amount: TonWeb.utils.toNano(amount.toString()),
-        seqno: seqno,
-        sendMode: 3,
-      })
-      .send();
-
-    res.json({
-      success: true,
-      message: "Withdrawal sent successfully",
-    });
-  } catch (error) {
-    console.error("Withdraw error:", error);
-    res.status(500).json({
-      error: "Withdrawal failed",
-    });
+  } catch (err) {
+    console.error("Auto withdraw error:", err);
   }
-});
+}
 
-/* ==============================
-   HEALTH CHECK
-============================== */
+// تشغيل كل 10 ثواني
+setInterval(processWithdrawals, 10000);
+
+/* ================= HEALTH ================= */
 
 app.get("/", (req, res) => {
-  res.send("TON Withdraw Server Running");
+  res.send("Auto TON Withdraw Server Running");
 });
 
-/* ==============================
-   START SERVER
-============================== */
+/* ================= START ================= */
 
 const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, () => {
   console.log("Server running on port " + PORT);
 });
