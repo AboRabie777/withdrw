@@ -9,10 +9,14 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-/* ================= TON SETUP ================= */
+/* ================= TON CONFIG ================= */
 
-if (!process.env.TON_API_KEY || !process.env.TON_MNEMONIC) {
-  console.error("Missing TON_API_KEY or TON_MNEMONIC");
+if (
+  !process.env.TON_API_KEY ||
+  !process.env.TON_MNEMONIC ||
+  !process.env.TON_WALLET_ADDRESS
+) {
+  console.error("Missing required environment variables");
   process.exit(1);
 }
 
@@ -22,7 +26,6 @@ const tonweb = new TonWeb(
   })
 );
 
-// تحويل mnemonic إلى private key بطريقة صحيحة
 const mnemonic = process.env.TON_MNEMONIC.trim().split(" ");
 
 if (mnemonic.length !== 12 && mnemonic.length !== 24) {
@@ -30,19 +33,22 @@ if (mnemonic.length !== 12 && mnemonic.length !== 24) {
   process.exit(1);
 }
 
-const keyPairData = await mnemonicToPrivateKey(mnemonic);
+// اشتقاق المفاتيح
+const keyPair = await mnemonicToPrivateKey(mnemonic);
 
+// إنشاء Wallet v4R2
 const WalletClass = tonweb.wallet.all.v4R2;
 
 const wallet = new WalletClass(tonweb.provider, {
-  publicKey: keyPairData.publicKey,
+  publicKey: keyPair.publicKey,
+  address: process.env.TON_WALLET_ADDRESS, // مهم جدًا
 });
 
 /* ================= FIREBASE ================= */
 
 const FIREBASE_URL = process.env.FIREBASE_DB_URL;
 
-/* ================= AUTO PROCESS ================= */
+/* ================= AUTO WITHDRAW ================= */
 
 async function processWithdrawals() {
   try {
@@ -58,9 +64,14 @@ async function processWithdrawals() {
 
       const seqno = await wallet.methods.seqno().call();
 
+      if (typeof seqno !== "number") {
+        console.log("Wallet not deployed or seqno unavailable");
+        return;
+      }
+
       await wallet.methods
         .transfer({
-          secretKey: keyPairData.secretKey,
+          secretKey: keyPair.secretKey,
           toAddress: w.address,
           amount: TonWeb.utils.toNano(w.netAmount.toString()),
           seqno: seqno,
@@ -68,6 +79,7 @@ async function processWithdrawals() {
         })
         .send();
 
+      // تحديث Firebase
       await fetch(`${FIREBASE_URL}/withdrawals/${id}.json`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -84,13 +96,16 @@ async function processWithdrawals() {
   }
 }
 
+// تشغيل كل 10 ثواني
 setInterval(processWithdrawals, 10000);
 
-/* ================= START ================= */
+/* ================= HEALTH CHECK ================= */
 
 app.get("/", (req, res) => {
   res.send("Auto TON Withdraw Server Running");
 });
+
+/* ================= START ================= */
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
