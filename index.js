@@ -17,12 +17,12 @@ admin.initializeApp({
 const db = admin.database();
 
 // ==========================
-// 🔹 TON Client (مع API Key)
+// 🔹 TON Client
 // ==========================
 
 const client = new TonClient({
   endpoint: "https://toncenter.com/api/v2/jsonRPC",
-  apiKey: process.env.TON_API_KEY, // 🔥 مهم جداً
+  apiKey: process.env.TON_API_KEY,
 });
 
 // ==========================
@@ -40,16 +40,15 @@ async function getWallet() {
 
   const contract = client.open(wallet);
 
-  console.log("SERVER WALLET ADDRESS:", wallet.address.toString());
-
-  return { contract, key };
+  return { contract, key, wallet };
 }
 
 // ==========================
-// 🔹 إرسال TON
+// 🔹 إرسال TON (مع Comment)
 // ==========================
 
 async function sendTON(toAddress, amount) {
+
   const { contract, key } = await getWallet();
 
   const seqno = await contract.getSeqno();
@@ -62,6 +61,7 @@ async function sendTON(toAddress, amount) {
         to: toAddress,
         value: toNano(String(amount)),
         bounce: false,
+        body: "@Crystal_Ranch_bot" // 🔥 التعليق
       }),
     ],
   });
@@ -86,6 +86,19 @@ withdrawalsRef.on("child_added", async (snapshot) => {
 
     console.log("Processing:", withdrawId);
 
+    // ✅ حد أقصى 1 TON
+    if (Number(data.netAmount) > 1) {
+      console.log("Amount exceeds auto limit. Leaving pending.");
+      return; // يظل pending
+    }
+
+    // ✅ تحقق من العنوان
+    if (!data.address || (!data.address.startsWith("EQ") && !data.address.startsWith("UQ"))) {
+      console.log("Invalid address. Leaving pending.");
+      return;
+    }
+
+    // تحويل مؤقت إلى processing
     await withdrawalsRef.child(withdrawId).update({
       status: "processing",
       updatedAt: Date.now(),
@@ -102,11 +115,11 @@ withdrawalsRef.on("child_added", async (snapshot) => {
 
   } catch (error) {
 
-    console.log("Error:", error.message);
+    console.log("Send error (kept pending):", error.message);
 
+    // 🔥 يرجعها pending ولا يرفضها
     await withdrawalsRef.child(withdrawId).update({
-      status: "failed",
-      error: error.message,
+      status: "pending",
       updatedAt: Date.now(),
     });
 
@@ -114,4 +127,4 @@ withdrawalsRef.on("child_added", async (snapshot) => {
 
 });
 
-console.log("🚀 TON Auto Withdraw Running (Wallet W5)...");
+console.log("🚀 TON Auto Withdraw Running (Wallet W5 Secure)...");
