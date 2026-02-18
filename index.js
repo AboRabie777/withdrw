@@ -1,6 +1,8 @@
 require("dotenv").config();
 const TonWeb = require("tonweb");
 const admin = require("firebase-admin");
+const nacl = require("tweetnacl");
+const bip39 = require("bip39");
 
 // ==========================
 // 🔹 Firebase
@@ -25,13 +27,14 @@ const provider = new TonWeb.HttpProvider(
 
 const tonweb = new TonWeb(provider);
 
-// 🔥 المفتاح السري
-const secretKey = TonWeb.utils.hexToBytes(process.env.PRIVATE_KEY);
+// 🔥 تحويل mnemonic إلى seed
+const mnemonic = process.env.TON_MNEMONIC.split(" ");
+const seed = bip39.mnemonicToSeedSync(mnemonic.join(" ")).slice(0, 32);
 
-// 🔥 استخراج Public Key الصحيح
-const keyPair = TonWeb.utils.keyPairFromSeed(secretKey);
+// 🔥 إنشاء keypair صحيح
+const keyPair = nacl.sign.keyPair.fromSeed(seed);
 
-// 🔥 إنشاء محفظة V3R2 الصحيحة
+// 🔥 إنشاء Wallet V3R2
 const WalletClass = tonweb.wallet.all.v3R2;
 const wallet = new WalletClass(tonweb.provider, {
   publicKey: keyPair.publicKey,
@@ -44,10 +47,9 @@ const wallet = new WalletClass(tonweb.provider, {
 
 async function sendTON(toAddress, amount) {
 
-  const walletAddress = await wallet.getAddress();
   const seqno = await wallet.methods.seqno().call();
 
-  if (seqno === null || seqno === undefined) {
+  if (typeof seqno !== "number") {
     throw new Error("Wallet not initialized on blockchain");
   }
 
