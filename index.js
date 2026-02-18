@@ -27,19 +27,24 @@ const provider = new TonWeb.HttpProvider(
 
 const tonweb = new TonWeb(provider);
 
-// 🔥 تحويل mnemonic إلى seed
-const mnemonic = process.env.TON_MNEMONIC.split(" ");
-const seed = bip39.mnemonicToSeedSync(mnemonic.join(" ")).slice(0, 32);
-
-// 🔥 إنشاء keypair صحيح
+// 🔥 mnemonic
+const mnemonic = process.env.TON_MNEMONIC;
+const seed = bip39.mnemonicToSeedSync(mnemonic).slice(0, 32);
 const keyPair = nacl.sign.keyPair.fromSeed(seed);
 
-// 🔥 إنشاء Wallet V3R2
-const WalletClass = tonweb.wallet.all.v3R2;
+// 🔥 Wallet V5
+const WalletClass = tonweb.wallet.all.v5R1;
+
 const wallet = new WalletClass(tonweb.provider, {
   publicKey: keyPair.publicKey,
   wc: 0,
 });
+
+// طباعة عنوان السيرفر
+(async () => {
+  const address = await wallet.getAddress();
+  console.log("SERVER WALLET ADDRESS:", address.toString(true, true, true));
+})();
 
 // ==========================
 // 🔹 إرسال TON
@@ -87,10 +92,6 @@ withdrawalsRef.on("child_added", async (snapshot) => {
       updatedAt: Date.now(),
     });
 
-    if (!data.address || !data.netAmount || Number(data.netAmount) <= 0) {
-      throw new Error("Invalid withdrawal data");
-    }
-
     const txHash = await sendTON(data.address, data.netAmount);
 
     await withdrawalsRef.child(withdrawId).update({
@@ -115,4 +116,4 @@ withdrawalsRef.on("child_added", async (snapshot) => {
 
 });
 
-console.log("🚀 TON Auto Withdraw Running...");
+console.log("🚀 TON Auto Withdraw Running (Wallet V5)...");
