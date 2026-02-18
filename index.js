@@ -1,8 +1,7 @@
 require("dotenv").config();
-const TonWeb = require("tonweb");
 const admin = require("firebase-admin");
-const nacl = require("tweetnacl");
-const bip39 = require("bip39");
+const { TonClient, WalletContractV5R1, internal, toNano } = require("@ton/ton");
+const { mnemonicToWalletKey } = require("@ton/crypto");
 
 // ==========================
 // 🔹 Firebase
@@ -21,53 +20,49 @@ const db = admin.database();
 // 🔹 TON Setup
 // ==========================
 
-const provider = new TonWeb.HttpProvider(
-  "https://toncenter.com/api/v2/jsonRPC"
-);
-
-const tonweb = new TonWeb(provider);
-
-// 🔥 mnemonic
-const mnemonic = process.env.TON_MNEMONIC;
-const seed = bip39.mnemonicToSeedSync(mnemonic).slice(0, 32);
-const keyPair = nacl.sign.keyPair.fromSeed(seed);
-
-// 🔥 Wallet V5
-const WalletClass = tonweb.wallet.all.v5R1;
-
-const wallet = new WalletClass(tonweb.provider, {
-  publicKey: keyPair.publicKey,
-  wc: 0,
+const client = new TonClient({
+  endpoint: "https://toncenter.com/api/v2/jsonRPC",
 });
 
-// طباعة عنوان السيرفر
-(async () => {
-  const address = await wallet.getAddress();
-  console.log("SERVER WALLET ADDRESS:", address.toString(true, true, true));
-})();
+async function getWallet() {
+  const mnemonic = process.env.TON_MNEMONIC.split(" ");
+  const key = await mnemonicToWalletKey(mnemonic);
+
+  const wallet = WalletContractV5R1.create({
+    workchain: 0,
+    publicKey: key.publicKey,
+  });
+
+  const contract = client.open(wallet);
+
+  const address = wallet.address.toString();
+  console.log("SERVER WALLET ADDRESS:", address);
+
+  return { contract, key };
+}
 
 // ==========================
 // 🔹 إرسال TON
 // ==========================
 
 async function sendTON(toAddress, amount) {
+  const { contract, key } = await getWallet();
 
-  const seqno = await wallet.methods.seqno().call();
+  const seqno = await contract.getSeqno();
 
-  if (typeof seqno !== "number") {
-    throw new Error("Wallet not initialized on blockchain");
-  }
-
-  const transfer = await wallet.methods.transfer({
-    secretKey: keyPair.secretKey,
-    toAddress: toAddress,
-    amount: TonWeb.utils.toNano(String(amount)),
+  await contract.sendTransfer({
+    secretKey: key.secretKey,
     seqno: seqno,
-    sendMode: 3,
+    messages: [
+      internal({
+        to: toAddress,
+        value: toNano(String(amount)),
+        bounce: false,
+      }),
+    ],
   });
 
-  const result = await transfer.send();
-  return result;
+  return "sent";
 }
 
 // ==========================
@@ -77,14 +72,12 @@ async function sendTON(toAddress, amount) {
 const withdrawalsRef = db.ref("withdrawals");
 
 withdrawalsRef.on("child_added", async (snapshot) => {
-
   const withdrawId = snapshot.key;
   const data = snapshot.val();
 
   if (!data || data.status !== "pending") return;
 
   try {
-
     console.log("Processing:", withdrawId);
 
     await withdrawalsRef.child(withdrawId).update({
@@ -92,18 +85,15 @@ withdrawalsRef.on("child_added", async (snapshot) => {
       updatedAt: Date.now(),
     });
 
-    const txHash = await sendTON(data.address, data.netAmount);
+    await sendTON(data.address, data.netAmount);
 
     await withdrawalsRef.child(withdrawId).update({
       status: "paid",
-      txHash: txHash,
       updatedAt: Date.now(),
     });
 
     console.log("Paid:", withdrawId);
-
   } catch (error) {
-
     console.log("Error:", error);
 
     await withdrawalsRef.child(withdrawId).update({
@@ -111,9 +101,7 @@ withdrawalsRef.on("child_added", async (snapshot) => {
       error: error.message,
       updatedAt: Date.now(),
     });
-
   }
-
 });
 
-console.log("🚀 TON Auto Withdraw Running (Wallet V5)...");
+console.log("🚀 TON Auto Withdraw Running (Wallet W5)...");
