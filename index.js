@@ -32,7 +32,7 @@ const wallet = tonweb.wallet.create({
 });
 
 // ==========================
-// 🔹 إرسال TON
+// 🔹 إرسال TON (معدل لحل مشكلة الدقة)
 // ==========================
 
 async function sendTON(toAddress, amount) {
@@ -41,7 +41,7 @@ async function sendTON(toAddress, amount) {
   const transfer = await wallet.methods.transfer({
     secretKey: secretKey,
     toAddress: toAddress,
-    amount: TonWeb.utils.toNano(amount),
+    amount: TonWeb.utils.toNano(String(amount)), // 🔥 الحل هنا
     seqno: seqno,
     sendMode: 3,
   });
@@ -71,10 +71,11 @@ withdrawalsRef.on("child_added", async (snapshot) => {
       updatedAt: Date.now(),
     });
 
-    if (!data.address || !data.netAmount || data.netAmount <= 0) {
+    if (!data.address || !data.netAmount || Number(data.netAmount) <= 0) {
       throw new Error("Invalid withdrawal data");
     }
 
+    // إرسال TON
     const txHash = await sendTON(data.address, data.netAmount);
 
     await withdrawalsRef.child(withdrawId).update({
