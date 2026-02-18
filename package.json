@@ -1,13 +1,13 @@
 {
-  "name": "ton-key-generator",
+  "name": "ton-auto",
   "version": "1.0.0",
-  "description": "Generate TON Private Key from Seed (Railway)",
-  "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "ton-crypto": "^3.2.0"
+    "dotenv": "^16.0.0",
+    "firebase-admin": "^11.0.0",
+    "tonweb": "^0.0.60"
   }
 }
