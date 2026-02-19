@@ -55,6 +55,7 @@ async function sendTON(toAddress, amount) {
   const senderAddress = contract.address.toString();
   
   console.log(`Sending ${amount} TON to ${toAddress}...`);
+  console.log(`Sender address: ${senderAddress}`);
   
   // إرسال المعاملة
   const transfer = await contract.sendTransfer({
@@ -74,8 +75,9 @@ async function sendTON(toAddress, amount) {
   let transactionHash = null;
   
   try {
-    // انتظار ثانية للتأكد من تسجيل المعاملة
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // انتظار 3 ثواني للتأكد من تسجيل المعاملة
+    console.log("Waiting for transaction to be recorded...");
+    await new Promise(resolve => setTimeout(resolve, 3000));
     
     // محاولة الحصول على آخر معاملة للمحفظة
     const transactions = await contract.getTransactions(1);
@@ -84,6 +86,16 @@ async function sendTON(toAddress, amount) {
       console.log(`✅ Transaction hash obtained: ${transactionHash}`);
     } else {
       console.log("⚠️ No transactions found after sending");
+      
+      // محاولة مرة أخرى بعد انتظار إضافي
+      console.log("Waiting additional 3 seconds and trying again...");
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      const transactionsRetry = await contract.getTransactions(1);
+      if (transactionsRetry && transactionsRetry.length > 0) {
+        transactionHash = transactionsRetry[0].hash.toString('hex');
+        console.log(`✅ Transaction hash obtained on retry: ${transactionHash}`);
+      }
     }
   } catch (error) {
     console.log("Could not fetch transaction hash:", error.message);
@@ -102,7 +114,7 @@ async function sendTON(toAddress, amount) {
 // 🔹 إرسال إشعار للمستخدم عبر تليجرام
 // ==========================
 
-async function sendTelegramNotification(chatId, amount, transactionHash = null) {
+async function sendTelegramNotification(chatId, amount, transactionHash = null, fromAddress = null) {
   // معرف البوت الخاص بك
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) {
@@ -117,29 +129,37 @@ async function sendTelegramNotification(chatId, amount, transactionHash = null) 
   }
 
   let message = '';
-  let transactionLink = '';
   
   if (transactionHash) {
-    transactionLink = `https://tonscan.org/tx/${transactionHash}`;
+    // إذا وجدنا هاش المعاملة
+    const transactionLink = `https://tonscan.org/tx/${transactionHash}`;
     message = `✅ Withdrawal Successful! 🎉
 
 💰 Amount: ${amount} TON
-🔗 ${transactionLink}
+🔗 <a href="${transactionLink}">View Transaction on Tonscan</a>
+📋 Hash: <code>${transactionHash.substring(0, 8)}...${transactionHash.substring(transactionHash.length - 8)}</code>
 
 Your funds have been delivered.`;
     
-    console.log(`🔗 Sending link: ${transactionLink}`);
+    console.log(`🔗 Sending transaction link: ${transactionLink}`);
+  } else if (fromAddress) {
+    // إذا لم نجد هاش، نرسل رابط المحفظة
+    const walletLink = `https://tonscan.org/address/${fromAddress}`;
+    message = `✅ Withdrawal Successful! 🎉
+
+💰 Amount: ${amount} TON
+🔗 <a href="${walletLink}">View Wallet on Tonscan</a>
+
+Your funds have been delivered. The transaction will appear in your wallet shortly.`;
+    
+    console.log(`🔗 Sending wallet link: ${walletLink}`);
   } else {
-    // رسالة بدون رابط إذا لم يكن هناك هاش
+    // رسالة احتياطية
     message = `✅ Withdrawal Successful! 🎉
 
 💰 Amount: ${amount} TON
 
-Your funds have been delivered.
-
-Note: Transaction hash not available yet.`;
-    
-    console.log("⚠️ No transaction hash available for notification");
+Your funds have been delivered. The transaction will appear in your wallet shortly.`;
   }
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
@@ -158,9 +178,10 @@ Note: Transaction hash not available yet.`;
       body: JSON.stringify(payload),
     });
 
+    const responseData = await response.json();
+    
     if (!response.ok) {
-      const errorData = await response.json();
-      console.error("❌ Failed to send Telegram notification:", errorData);
+      console.error("❌ Failed to send Telegram notification:", responseData);
     } else {
       console.log(`✅ Telegram notification sent to chat ${chatId} for amount ${amount} TON.`);
     }
@@ -184,8 +205,10 @@ withdrawalsRef.on("child_added", async (snapshot) => {
 
   try {
 
-    console.log("Processing:", withdrawId);
+    console.log("\n=====================");
+    console.log("Processing withdrawal:", withdrawId);
     console.log("Withdrawal data:", JSON.stringify(data, null, 2));
+    console.log("=====================\n");
 
     // ✅ حد أقصى 1 TON
     if (Number(data.netAmount) > 1) {
@@ -221,7 +244,7 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     // إرسال TON والحصول على تفاصيل المعاملة
     const result = await sendTON(data.address, data.netAmount);
     
-    console.log("SendTON result:", JSON.stringify(result, null, 2));
+    console.log("\n📦 SendTON result:", JSON.stringify(result, null, 2));
 
     // تحديث الحالة إلى "paid" مع حفظ رابط المعاملة
     const updateData = {
@@ -235,25 +258,32 @@ withdrawalsRef.on("child_added", async (snapshot) => {
       console.log(`✅ Transaction hash saved: ${result.hash}`);
     } else {
       console.log("⚠️ No transaction hash from sendTON");
+      // حفظ عنوان المحفظة كبديل
+      updateData.fromAddress = result.fromAddress;
     }
 
     await withdrawalsRef.child(withdrawId).update(updateData);
 
-    console.log("Paid:", withdrawId);
+    console.log("✅ Withdrawal marked as paid:", withdrawId);
 
     // ==========================
-    // 🔹 إرسال إشعار تليجرام بعد الدفع الناجح مع الرابط
+    // 🔹 إرسال إشعار تليجرام بعد الدفع الناجح
     // ==========================
     if (userId) {
-        // تمرير رابط المعاملة للإشعار
-        await sendTelegramNotification(userId, data.netAmount, result.hash);
+        // تمرير الهاش إذا وجد، وإلا نمرر عنوان المحفظة
+        await sendTelegramNotification(
+          userId, 
+          data.netAmount, 
+          result.hash,
+          result.fromAddress
+        );
     } else {
         console.log(`ℹ️ Could not extract user ID from withdrawal ${withdrawId}. Skipping Telegram notification.`);
     }
 
   } catch (error) {
 
-    console.log("Send error (kept pending):", error.message);
+    console.log("❌ Send error:", error.message);
     console.log("Error details:", error);
 
     // 🔥 يرجعها pending ولا يرفضها
