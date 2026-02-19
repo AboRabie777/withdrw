@@ -1,12 +1,10 @@
 {
   "name": "crystal-ranch-bot",
   "version": "1.0.0",
-  "description": "Crystal Ranch Telegram Bot",
+  "description": "Crystal Ranch Telegram Bot with TON Auto Withdraw",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "start:welcome": "node welcomeBot.js",
-    "start:all": "node index.js & node welcomeBot.js"
+    "start": "node index.js"
   },
   "dependencies": {
     "@ton/ton": "^15.1.0",
