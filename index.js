@@ -19,19 +19,10 @@ process.on('SIGINT', () => {
   console.log('⚠️ Received SIGINT - IGNORING');
 });
 
-process.on('SIGQUIT', () => {
-  console.log('⚠️ Received SIGQUIT - IGNORING');
-});
-
-process.on('SIGHUP', () => {
-  console.log('⚠️ Received SIGHUP - IGNORING');
-});
-
 // Keep-alive كل 20 ثانية
 setInterval(() => {
   console.log('💓 BOT ALIVE - ' + new Date().toISOString());
   
-  // كتابة ملف مؤقت لإثبات أن البوت شغال
   const fs = require('fs');
   try {
     fs.writeFileSync('/tmp/bot-alive.txt', Date.now().toString());
@@ -198,14 +189,20 @@ Your funds have been delivered.`;
 }
 
 // ==========================
-// 🔹 إرسال إشعار للقناة (معدل - مع الرابط الصحيح)
+// 🔹 إرسال إشعار للقناة - في الموضوع الصحيح
 // ==========================
 
 async function sendChannelNotification(amount, toAddress, userId) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) return;
   
-  const channelId = "@Crystal_Ranch_chat";
+  // معرف المجموعة
+  const chatId = "@Crystal_Ranch_chat";
+  
+  // معرف الموضوع الصحيح لـ "Withdrawals & deposit 💰"
+  // من الرابط: https://t.me/Crystal_Ranch_chat/5
+  const topicId = 5; // هذا هو الرقم الصحيح من الرابط
+  
   const walletLink = `https://tonviewer.com/${toAddress}`;
   
   const channelMessage = `🎉 New Withdrawal! 🎉
@@ -216,10 +213,11 @@ async function sendChannelNotification(amount, toAddress, userId) {
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
   const payload = {
-    chat_id: channelId,
+    chat_id: chatId,
     text: channelMessage,
     parse_mode: 'HTML',
-    disable_web_page_preview: true
+    disable_web_page_preview: true,
+    message_thread_id: topicId // هذا هو المفتاح! يحدد الموضوع
   };
 
   try {
@@ -232,46 +230,18 @@ async function sendChannelNotification(amount, toAddress, userId) {
     const data = await response.json();
     
     if (data.ok && data.result) {
-      // الرابط الصحيح للرسالة في القناة
-      const messageLink = `https://t.me/Crystal_Ranch_chat/${data.result.message_id}`;
-      console.log(`✅ Channel notification sent: ${messageLink}`);
+      // الرابط الصحيح للرسالة في الموضوع
+      const messageLink = `https://t.me/Crystal_Ranch_chat/${topicId}/${data.result.message_id}`;
+      console.log(`✅ Channel notification sent to topic #${topicId}: ${messageLink}`);
       
-      // إرسال تأكيد إلى نفس القناة أو مجموعة المراقبة
-      await sendConfirmationMessage(messageLink, amount, userId);
+      // إرسال تأكيد简短
+      console.log(`📬 Message posted in Withdrawals topic`);
     } else {
       console.log("❌ Failed to send channel notification:", data);
     }
   } catch (error) {
     console.log("❌ Error sending channel notification:", error.message);
   }
-}
-
-// ==========================
-// 🔹 إرسال رسالة تأكيد بالرابط (اختياري)
-// ==========================
-
-async function sendConfirmationMessage(messageLink, amount, userId) {
-  const botToken = process.env.TELEGRAM_BOT_TOKEN;
-  if (!botToken) return;
-  
-  // يمكن إرسال تأكيد إلى نفس القناة أو إلى مجموعة منفصلة
-  const confirmMessage = `✅ Posted: ${messageLink}`;
-  
-  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
-  const payload = {
-    chat_id: "@Crystal_Ranch_chat", // أو معرف مجموعة منفصلة
-    text: confirmMessage,
-    disable_web_page_preview: true
-  };
-
-  try {
-    await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    console.log(`✅ Confirmation sent`);
-  } catch (error) {}
 }
 
 // ==========================
@@ -401,7 +371,7 @@ withdrawalsRef.on("child_added", async (snapshot) => {
 
     // إرسال TON
     console.log(`💰 Sending ${data.netAmount} TON to ${data.address.substring(0,10)}...`);
-    const result = await sendTON(data.address, data.netAmount);
+    await sendTON(data.address, data.netAmount);
 
     // تحديث إلى paid
     const updateData = {
@@ -416,15 +386,10 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     // إرسال الإشعارات
     if (userId) {
       // إشعار المستخدم
-      const sent = await sendUserNotification(userId, data.netAmount, data.address);
+      await sendUserNotification(userId, data.netAmount, data.address);
       
-      // إشعار القناة (بغض النظر عن نتيجة إشعار المستخدم)
-      if (sent) {
-        await sendChannelNotification(data.netAmount, data.address, userId);
-      } else {
-        // حتى لو فشل إشعار المستخدم، نرسل إشعار القناة
-        await sendChannelNotification(data.netAmount, data.address, userId);
-      }
+      // إشعار القناة في الموضوع الصحيح (رقم 5)
+      await sendChannelNotification(data.netAmount, data.address, userId);
     }
 
   } catch (error) {
@@ -444,14 +409,12 @@ withdrawalsRef.on("child_added", async (snapshot) => {
 });
 
 // ==========================
-// 🔹 التحقق من Firebase connection
+// 🔹 التحقق من Firebase
 // ==========================
 
 db.ref(".info/connected").on("value", (snap) => {
   if (snap.val() === true) {
     console.log("📡 Firebase connected");
-  } else {
-    console.log("📡 Firebase disconnected");
   }
 });
 
@@ -481,5 +444,5 @@ getWallet().catch(err => {
 });
 
 console.log("\n💸 TON Auto Withdraw Running (Max 1 TON)");
-console.log("✅ Channel links will be: https://t.me/Crystal_Ranch_chat/[message_id]");
+console.log("📬 Messages will be sent to topic #5 (Withdrawals & deposit 💰)");
 console.log("=".repeat(50) + "\n");
