@@ -44,7 +44,7 @@ async function getWallet() {
 }
 
 // ==========================
-// 🔹 إرسال TON (مع Comment)
+// 🔹 إرسال TON (مع Comment محسن)
 // ==========================
 
 async function sendTON(toAddress, amount) {
@@ -57,7 +57,12 @@ async function sendTON(toAddress, amount) {
   console.log(`Sending ${amount} TON to ${toAddress}...`);
   console.log(`Sender address: ${senderAddress}`);
   
-  // إرسال المعاملة
+  // تحذير إذا كان المبلغ صغير جداً
+  if (amount < 0.2) {
+    console.log("⚠️ Amount is very small (less than 0.2 TON), may be marked as spam");
+  }
+  
+  // إرسال المعاملة مع تحسينات لتجنب الـ Spam
   const transfer = await contract.sendTransfer({
     secretKey: key.secretKey,
     seqno: seqno,
@@ -65,8 +70,8 @@ async function sendTON(toAddress, amount) {
       internal({
         to: toAddress,
         value: toNano(String(amount)),
-        bounce: false,
-        body: "@Crystal_Ranch_bot"
+        bounce: true, // تم التغيير إلى true
+        body: "Withdrawal from @Crystal_Ranch_bot" // تعليق أوضح
       }),
     ],
   });
@@ -316,3 +321,6 @@ withdrawalsRef.on("child_added", async (snapshot) => {
 });
 
 console.log("🚀 TON Auto Withdraw Running (Wallet W5 Secure)...");
+console.log("✅ Bounce enabled to reduce spam detection");
+console.log("✅ Comment improved: 'Withdrawal from @Crystal_Ranch_bot'");
+console.log("⚠️ Warning: Amounts less than 0.2 TON may be marked as spam on Tonviewer");
