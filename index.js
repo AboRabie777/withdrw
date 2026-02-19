@@ -48,12 +48,14 @@ async function getWallet() {
 // ==========================
 
 async function sendTON(toAddress, amount) {
-
   const { contract, key } = await getWallet();
-
   const seqno = await contract.getSeqno();
-
-  await contract.sendTransfer({
+  
+  // الحصول على عنوان المحفظة المرسلة
+  const senderAddress = contract.address.toString();
+  
+  // إرسال المعاملة
+  const transfer = await contract.sendTransfer({
     secretKey: key.secretKey,
     seqno: seqno,
     messages: [
@@ -66,15 +68,35 @@ async function sendTON(toAddress, amount) {
     ],
   });
 
-  return "sent";
+  // محاولة الحصول على Hash المعاملة
+  // ملاحظة: قد تختلف طريقة الحصول على الـ hash حسب إصدار المكتبة
+  let transactionHash = null;
+  
+  try {
+    // محاولة الحصول على آخر معاملة للمحفظة
+    const transactions = await contract.getTransactions(1);
+    if (transactions && transactions.length > 0) {
+      transactionHash = transactions[0].hash.toString('hex');
+    }
+  } catch (error) {
+    console.log("Could not fetch transaction hash:", error.message);
+  }
+
+  return {
+    status: "sent",
+    hash: transactionHash,
+    fromAddress: senderAddress,
+    toAddress: toAddress,
+    amount: amount
+  };
 }
 
 // ==========================
 // 🔹 إرسال إشعار للمستخدم عبر تليجرام
 // ==========================
 
-async function sendTelegramNotification(chatId, amount) {
-  // معرف البوت الخاص بك (تحتاج إلى تخزينه في متغيرات البيئة)
+async function sendTelegramNotification(chatId, amount, transactionHash) {
+  // معرف البوت الخاص بك
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) {
     console.error("⚠️ TELEGRAM_BOT_TOKEN is not set in .env file. Cannot send notification.");
@@ -87,15 +109,25 @@ async function sendTelegramNotification(chatId, amount) {
     return;
   }
 
+  // إنشاء رابط المعاملة
+  let transactionLink = "https://tonviewer.com/";
+  if (transactionHash) {
+    transactionLink = `https://tonviewer.com/transaction/${transactionHash}`;
+  } else {
+    // إذا لم نتمكن من الحصول على الـ hash، نعرض عنوان المحفظة كبديل
+    transactionLink = "https://tonviewer.com/";
+  }
+
   const message = `💰 The payment of ${amount} TON has been successfully completed.
 
-🔎 View on TON Viewer (https://tonviewer.com/)`;
+🔎 View Transaction: ${transactionLink}`;
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
   const payload = {
     chat_id: chatId,
     text: message,
     parse_mode: 'HTML',
+    disable_web_page_preview: false // لتمكين معاينة الرابط
   };
 
   try {
@@ -166,21 +198,32 @@ withdrawalsRef.on("child_added", async (snapshot) => {
       updatedAt: Date.now(),
     });
 
-    await sendTON(data.address, data.netAmount);
+    // إرسال TON والحصول على تفاصيل المعاملة
+    const result = await sendTON(data.address, data.netAmount);
 
-    // تحديث الحالة إلى "paid"
-    await withdrawalsRef.child(withdrawId).update({
+    // تحديث الحالة إلى "paid" مع حفظ رابط المعاملة إن وجد
+    const updateData = {
       status: "paid",
       updatedAt: Date.now(),
-    });
+    };
+    
+    if (result.hash) {
+      updateData.transactionHash = result.hash;
+      updateData.transactionLink = `https://tonviewer.com/transaction/${result.hash}`;
+    }
+
+    await withdrawalsRef.child(withdrawId).update(updateData);
 
     console.log("Paid:", withdrawId);
+    if (result.hash) {
+      console.log(`Transaction Hash: ${result.hash}`);
+    }
 
     // ==========================
     // 🔹 إرسال إشعار تليجرام بعد الدفع الناجح
     // ==========================
     if (userId) {
-        await sendTelegramNotification(userId, data.netAmount);
+        await sendTelegramNotification(userId, data.netAmount, result.hash);
     } else {
         console.log(`ℹ️ Could not extract user ID from withdrawal ${withdrawId}. Skipping Telegram notification.`);
     }
