@@ -87,19 +87,15 @@ async function sendTelegramNotification(chatId, amount) {
     return;
   }
 
-  // إنشاء رابط عرض المعاملة (اختياري)
-  // لا يمكننا الحصول على رابط المعاملة بسهولة هنا، لذلك سنتركه عاماً أو نضيفه لاحقاً
-  // const transactionLink = `https://tonscan.org/tx/...`; 
-
   const message = `💰 The payment of ${amount} TON has been successfully completed.
 
-🔎 View on TON Viewer (https://tonviewer.com/)`; // رابط عام للموقع
+🔎 View on TON Viewer (https://tonviewer.com/)`;
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
   const payload = {
     chat_id: chatId,
     text: message,
-    parse_mode: 'HTML', // أو 'Markdown' إذا أردت تنسيق النص
+    parse_mode: 'HTML',
   };
 
   try {
@@ -122,7 +118,6 @@ async function sendTelegramNotification(chatId, amount) {
   }
 }
 
-
 // ==========================
 // 🔹 مراقبة السحوبات
 // ==========================
@@ -131,7 +126,7 @@ const withdrawalsRef = db.ref("withdrawals");
 
 withdrawalsRef.on("child_added", async (snapshot) => {
 
-  const withdrawId = snapshot.key;
+  const withdrawId = snapshot.key; // مثلاً: wd_1771515897654_6970148965
   const data = snapshot.val();
 
   if (!data || data.status !== "pending") return;
@@ -150,6 +145,19 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     if (!data.address || (!data.address.startsWith("EQ") && !data.address.startsWith("UQ"))) {
       console.log("Invalid address. Leaving pending.");
       return;
+    }
+
+    // ==========================
+    // 🔹 استخراج User ID من withdrawId
+    // ==========================
+    let userId = null;
+    if (withdrawId.startsWith("wd_")) {
+      const parts = withdrawId.split("_");
+      if (parts.length >= 3) {
+        // parts[1] هو timestamp، parts[2] هو userId
+        userId = parts[2];
+        console.log(`✅ Extracted user ID: ${userId} from withdrawal ID`);
+      }
     }
 
     // تحويل مؤقت إلى processing
@@ -171,14 +179,11 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     // ==========================
     // 🔹 إرسال إشعار تليجرام بعد الدفع الناجح
     // ==========================
-    // تأكد من أن لديك حقل 'chatId' في بيانات السحب (data.chatId)
-    // إذا كان اسم الحقل مختلفاً (مثل 'userId' أو 'telegramId')، غيّره هنا.
-    if (data.chatId) {
-        await sendTelegramNotification(data.chatId, data.netAmount);
+    if (userId) {
+        await sendTelegramNotification(userId, data.netAmount);
     } else {
-        console.log(`ℹ️ No chatId found for withdrawal ${withdrawId}. Skipping Telegram notification.`);
+        console.log(`ℹ️ Could not extract user ID from withdrawal ${withdrawId}. Skipping Telegram notification.`);
     }
-
 
   } catch (error) {
 
