@@ -1,13 +1,12 @@
 {
   "name": "crystal-ranch-bot",
   "version": "1.0.0",
-  "description": "Crystal Ranch Telegram Bot with TON Auto Withdraw",
+  "description": "Crystal Ranch Telegram Bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "start:withdraw": "node index.js",
     "start:welcome": "node welcomeBot.js",
-    "dev": "nodemon index.js"
+    "start:all": "node index.js & node welcomeBot.js"
   },
   "dependencies": {
     "@ton/ton": "^15.1.0",
@@ -15,20 +14,5 @@
     "firebase-admin": "^11.11.0",
     "dotenv": "^16.3.1",
     "node-telegram-bot-api": "^0.64.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  },
-  "keywords": [
-    "telegram",
-    "bot",
-    "ton",
-    "crypto",
-    "withdraw"
-  ],
-  "author": "AboRabie777",
-  "license": "MIT"
+  }
 }
