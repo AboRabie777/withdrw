@@ -2,6 +2,23 @@ require("dotenv").config();
 const TelegramBot = require('node-telegram-bot-api');
 
 // ==========================
+// 🔹 إعدادات الـ Logging
+// ==========================
+
+let logCounter = 0;
+const MAX_LOGS_PER_MINUTE = 50;
+
+function smartLog(...args) {
+  logCounter++;
+  if (logCounter > MAX_LOGS_PER_MINUTE) return;
+  console.log(...args);
+}
+
+setInterval(() => {
+  logCounter = 0;
+}, 60000);
+
+// ==========================
 // 🔹 نص الترحيب
 // ==========================
 
@@ -27,7 +44,7 @@ function startWelcomeBot() {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   
   if (!botToken) {
-    console.error("⚠️ TELEGRAM_BOT_TOKEN not set. Welcome bot cannot start.");
+    console.error("❌ TELEGRAM_BOT_TOKEN missing");
     return null;
   }
   
@@ -36,10 +53,8 @@ function startWelcomeBot() {
   // أمر /start
   welcomeBot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
-    const firstName = msg.from.first_name || '';
-    const username = msg.from.username || '';
     
-    console.log(`👋 Welcome bot: User ${firstName} (@${username}) [${chatId}] started`);
+    smartLog(`👋 New user: ${chatId}`);
     
     const keyboard = {
       inline_keyboard: [
@@ -54,78 +69,42 @@ function startWelcomeBot() {
     try {
       await welcomeBot.sendMessage(chatId, WELCOME_TEXT, {
         reply_markup: keyboard,
-        disable_web_page_preview: true,
-        parse_mode: 'HTML'
+        disable_web_page_preview: true
       });
-      
-      console.log(`✅ Welcome message sent to ${firstName} (${chatId})`);
     } catch (error) {
-      console.error("❌ Error sending welcome message:", error.message);
+      smartLog(`❌ Error: ${error.message}`);
     }
   });
   
   // أمر /help
   welcomeBot.onText(/\/help/, async (msg) => {
     const chatId = msg.chat.id;
-    const helpText = `
-🤖 *Crystal Ranch Bot Commands:*
-
-/start - Start the bot and see welcome message
-/help - Show this help message
-/about - About Crystal Ranch
-    `;
+    const helpText = `/start - Welcome message
+/help - This help
+/about - About`;
     
-    try {
-      await welcomeBot.sendMessage(chatId, helpText, { parse_mode: 'Markdown' });
-    } catch (error) {
-      console.error("❌ Error sending help message:", error.message);
-    }
+    await welcomeBot.sendMessage(chatId, helpText);
   });
   
   // أمر /about
   welcomeBot.onText(/\/about/, async (msg) => {
     const chatId = msg.chat.id;
-    const aboutText = `
-💎 *About Crystal Ranch*
-
-Crystal Ranch is a scarcity-based economy game on Telegram.
-Early entry is the key to success!
-
-🔗 *Links:*
-• App: @Crystal_Ranch_bot
-• Chat: @Crystal_Ranch_chat
-• Channel: @earnmoney139482
-
-Join now and secure your place! 🚀
-    `;
+    const aboutText = `💎 Crystal Ranch
+App: @Crystal_Ranch_bot
+Chat: @Crystal_Ranch_chat`;
     
-    try {
-      await welcomeBot.sendMessage(chatId, aboutText, { parse_mode: 'Markdown' });
-    } catch (error) {
-      console.error("❌ Error sending about message:", error.message);
-    }
+    await welcomeBot.sendMessage(chatId, aboutText);
   });
   
-  // معالجة الأخطاء في polling
-  welcomeBot.on('polling_error', (error) => {
-    console.error('⚠️ Polling error:', error.message);
-  });
+  // معالجة الأخطاء بصمت
+  welcomeBot.on('polling_error', () => {});
   
-  console.log("🚀 Welcome bot is running independently...");
+  smartLog("✅ Welcome bot active");
   return welcomeBot;
 }
 
-// ==========================
-// 🔹 تشغيل البوت إذا تم استدعاء الملف مباشرة
-// ==========================
-
 if (require.main === module) {
-  console.log("🔵 Starting Welcome Bot standalone mode...");
   startWelcomeBot();
 }
-
-// ==========================
-// 🔹 تصدير الدالة لاستخدامها في ملفات أخرى
-// ==========================
 
 module.exports = { startWelcomeBot, WELCOME_TEXT };
