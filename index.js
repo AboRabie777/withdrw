@@ -114,13 +114,13 @@ async function sendTelegramNotification(chatId, amount, transactionHash = null) 
     transactionLink = `https://tonscan.org/tx/${transactionHash}`;
   }
 
-  // الرسالة المعدلة - أكثر حماساً مع الرابط
+  // الرسالة المعدلة - مع الرابط وبدون العبارة الزائدة
   const message = `✅ Withdrawal Successful! 🎉
 
 💰 Amount: ${amount} TON
 🔗 <a href="${transactionLink}">View on Tonscan</a>
 
-Your funds have been delivered. Ready to hatch more eggs? 🐣`;
+Your funds have been delivered.`;
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
   const payload = {
