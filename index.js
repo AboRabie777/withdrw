@@ -69,7 +69,6 @@ async function sendTON(toAddress, amount) {
   });
 
   // محاولة الحصول على Hash المعاملة
-  // ملاحظة: قد تختلف طريقة الحصول على الـ hash حسب إصدار المكتبة
   let transactionHash = null;
   
   try {
@@ -92,10 +91,10 @@ async function sendTON(toAddress, amount) {
 }
 
 // ==========================
-// 🔹 إرسال إشعار للمستخدم عبر تليجرام
+// 🔹 إرسال إشعار للمستخدم عبر تليجرام (للسحوبات)
 // ==========================
 
-async function sendTelegramNotification(chatId, amount) {
+async function sendWithdrawalNotification(chatId, amount) {
   // معرف البوت الخاص بك
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) {
@@ -109,7 +108,7 @@ async function sendTelegramNotification(chatId, amount) {
     return;
   }
 
-  // الرسالة المطلوبة: فقط المبلغ بدون رابط
+  // رسالة السحب
   const message = `💰 The payment of ${amount} TON has been successfully completed.`;
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
@@ -132,7 +131,7 @@ async function sendTelegramNotification(chatId, amount) {
       const errorData = await response.json();
       console.error("❌ Failed to send Telegram notification:", errorData);
     } else {
-      console.log(`✅ Telegram notification sent to chat ${chatId} for amount ${amount} TON.`);
+      console.log(`✅ Withdrawal notification sent to chat ${chatId} for amount ${amount} TON.`);
     }
   } catch (error) {
     console.error("❌ Error sending Telegram notification:", error.message);
@@ -140,7 +139,71 @@ async function sendTelegramNotification(chatId, amount) {
 }
 
 // ==========================
-// 🔹 مراقبة السحوبات
+// 🔹 إرسال إشعار إيداع للمستخدم عبر تليجرام (مع رابط Tonscan)
+// ==========================
+
+async function sendDepositNotification(chatId, amount, transactionHash) {
+  // معرف البوت الخاص بك
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) {
+    console.error("⚠️ TELEGRAM_BOT_TOKEN is not set in .env file. Cannot send notification.");
+    return;
+  }
+
+  // التأكد من أن chatId صالح
+  if (!chatId) {
+    console.log("⚠️ No chatId found for this deposit. Skipping notification.");
+    return;
+  }
+
+  // التأكد من وجود transactionHash
+  if (!transactionHash) {
+    console.log("⚠️ No transaction hash found for this deposit. Skipping notification.");
+    return;
+  }
+
+  // إنشاء رابط Tonscan للمعاملة
+  const tonscanLink = `https://tonscan.org/tx/${transactionHash}`;
+
+  // رسالة الإيداع كما طلبت
+  const message = `💰 Deposit Confirmed!
+
+💵 Amount: ${amount} TON
+🔗 <a href="${tonscanLink}">View on Tonscan</a>
+
+Your balance has been updated. Time to grow your farm! 🐔`;
+
+  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+  const payload = {
+    chat_id: chatId,
+    text: message,
+    parse_mode: 'HTML',
+    disable_web_page_preview: false // لتمكين معاينة الرابط
+  };
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      console.error("❌ Failed to send deposit notification:", errorData);
+    } else {
+      console.log(`✅ Deposit notification sent to chat ${chatId} for amount ${amount} TON.`);
+      console.log(`   Transaction link: ${tonscanLink}`);
+    }
+  } catch (error) {
+    console.error("❌ Error sending deposit notification:", error.message);
+  }
+}
+
+// ==========================
+// 🔹 مراقبة السحوبات (Withdrawals)
 // ==========================
 
 const withdrawalsRef = db.ref("withdrawals");
@@ -154,7 +217,7 @@ withdrawalsRef.on("child_added", async (snapshot) => {
 
   try {
 
-    console.log("Processing:", withdrawId);
+    console.log("Processing withdrawal:", withdrawId);
 
     // ✅ حد أقصى 1 TON
     if (Number(data.netAmount) > 1) {
@@ -198,22 +261,22 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     
     if (result.hash) {
       updateData.transactionHash = result.hash;
-      updateData.transactionLink = `https://tonviewer.com/transaction/${result.hash}`;
+      updateData.transactionLink = `https://tonscan.org/tx/${result.hash}`;
     }
 
     await withdrawalsRef.child(withdrawId).update(updateData);
 
-    console.log("Paid:", withdrawId);
+    console.log("Withdrawal paid:", withdrawId);
     if (result.hash) {
       console.log(`Transaction Hash: ${result.hash}`);
+      console.log(`Tonscan Link: https://tonscan.org/tx/${result.hash}`);
     }
 
     // ==========================
-    // 🔹 إرسال إشعار تليجرام بعد الدفع الناجح
+    // 🔹 إرسال إشعار السحب للمستخدم
     // ==========================
     if (userId) {
-        // ملاحظة: أزلنا result.hash من الدالة لأننا لا نريد الرابط
-        await sendTelegramNotification(userId, data.netAmount);
+        await sendWithdrawalNotification(userId, data.netAmount);
     } else {
         console.log(`ℹ️ Could not extract user ID from withdrawal ${withdrawId}. Skipping Telegram notification.`);
     }
@@ -232,4 +295,55 @@ withdrawalsRef.on("child_added", async (snapshot) => {
 
 });
 
-console.log("🚀 TON Auto Withdraw Running (Wallet W5 Secure)...");
+// ==========================
+// 🔹 مراقبة الإيداعات (Deposits) - إذا كنت تريد مراقبة الإيداعات أيضاً
+// ==========================
+// هذا مثال لكيفية مراقبة الإيداعات وإرسال إشعار عند تأكيد الإيداع
+// يمكنك تفعيل هذا الجزء إذا كان لديك هيكل مشابه في Firebase
+
+const depositsRef = db.ref("deposits");
+
+depositsRef.on("child_added", async (snapshot) => {
+
+  const depositId = snapshot.key;
+  const data = snapshot.val();
+
+  // تحقق من أن الإيداع بحالة confirmed ولم يتم إرسال إشعار له بعد
+  if (!data || data.status !== "confirmed" || data.notificationSent === true) return;
+
+  try {
+
+    console.log("Processing deposit notification:", depositId);
+
+    // استخراج User ID (افترض أن لديك حقل userId في بيانات الإيداع)
+    const userId = data.userId || data.chatId;
+    
+    if (!userId) {
+      console.log(`⚠️ No user ID found for deposit ${depositId}. Skipping notification.`);
+      return;
+    }
+
+    // التأكد من وجود transaction hash
+    if (!data.transactionHash) {
+      console.log(`⚠️ No transaction hash found for deposit ${depositId}. Skipping notification.`);
+      return;
+    }
+
+    // إرسال إشعار الإيداع مع رابط Tonscan
+    await sendDepositNotification(userId, data.amount, data.transactionHash);
+
+    // تحديث حالة الإشعار في قاعدة البيانات
+    await depositsRef.child(depositId).update({
+      notificationSent: true,
+      notificationSentAt: Date.now(),
+    });
+
+    console.log(`✅ Deposit notification sent for ${depositId}`);
+
+  } catch (error) {
+    console.error("❌ Error processing deposit notification:", error.message);
+  }
+
+});
+
+console.log("🚀 TON Auto Withdraw & Deposit Notifications Running (Wallet W5 Secure)...");
