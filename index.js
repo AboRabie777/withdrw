@@ -54,6 +54,8 @@ async function sendTON(toAddress, amount) {
   // الحصول على عنوان المحفظة المرسلة
   const senderAddress = contract.address.toString();
   
+  console.log(`Sending ${amount} TON to ${toAddress}...`);
+  
   // إرسال المعاملة
   const transfer = await contract.sendTransfer({
     secretKey: key.secretKey,
@@ -72,10 +74,16 @@ async function sendTON(toAddress, amount) {
   let transactionHash = null;
   
   try {
+    // انتظار ثانية للتأكد من تسجيل المعاملة
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
     // محاولة الحصول على آخر معاملة للمحفظة
     const transactions = await contract.getTransactions(1);
     if (transactions && transactions.length > 0) {
       transactionHash = transactions[0].hash.toString('hex');
+      console.log(`✅ Transaction hash obtained: ${transactionHash}`);
+    } else {
+      console.log("⚠️ No transactions found after sending");
     }
   } catch (error) {
     console.log("Could not fetch transaction hash:", error.message);
@@ -108,23 +116,30 @@ async function sendTelegramNotification(chatId, amount, transactionHash = null) 
     return;
   }
 
-  // إنشاء رابط المعاملة إذا كان الهاش موجوداً
+  let message = '';
   let transactionLink = '';
-  let message = `✅ Withdrawal Successful! 🎉
-
-💰 Amount: ${amount} TON
-
-Your funds have been delivered.`;
   
   if (transactionHash) {
     transactionLink = `https://tonscan.org/tx/${transactionHash}`;
-    // إضافة الرابط كاملاً في الرسالة
     message = `✅ Withdrawal Successful! 🎉
 
 💰 Amount: ${amount} TON
 🔗 ${transactionLink}
 
 Your funds have been delivered.`;
+    
+    console.log(`🔗 Sending link: ${transactionLink}`);
+  } else {
+    // رسالة بدون رابط إذا لم يكن هناك هاش
+    message = `✅ Withdrawal Successful! 🎉
+
+💰 Amount: ${amount} TON
+
+Your funds have been delivered.
+
+Note: Transaction hash not available yet.`;
+    
+    console.log("⚠️ No transaction hash available for notification");
   }
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
@@ -148,9 +163,6 @@ Your funds have been delivered.`;
       console.error("❌ Failed to send Telegram notification:", errorData);
     } else {
       console.log(`✅ Telegram notification sent to chat ${chatId} for amount ${amount} TON.`);
-      if (transactionHash) {
-        console.log(`🔗 Transaction link: ${transactionLink}`);
-      }
     }
   } catch (error) {
     console.error("❌ Error sending Telegram notification:", error.message);
@@ -173,6 +185,7 @@ withdrawalsRef.on("child_added", async (snapshot) => {
   try {
 
     console.log("Processing:", withdrawId);
+    console.log("Withdrawal data:", JSON.stringify(data, null, 2));
 
     // ✅ حد أقصى 1 TON
     if (Number(data.netAmount) > 1) {
@@ -207,6 +220,8 @@ withdrawalsRef.on("child_added", async (snapshot) => {
 
     // إرسال TON والحصول على تفاصيل المعاملة
     const result = await sendTON(data.address, data.netAmount);
+    
+    console.log("SendTON result:", JSON.stringify(result, null, 2));
 
     // تحديث الحالة إلى "paid" مع حفظ رابط المعاملة
     const updateData = {
@@ -217,15 +232,14 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     if (result.hash) {
       updateData.transactionHash = result.hash;
       updateData.transactionLink = `https://tonscan.org/tx/${result.hash}`;
+      console.log(`✅ Transaction hash saved: ${result.hash}`);
+    } else {
+      console.log("⚠️ No transaction hash from sendTON");
     }
 
     await withdrawalsRef.child(withdrawId).update(updateData);
 
     console.log("Paid:", withdrawId);
-    if (result.hash) {
-      console.log(`Transaction Hash: ${result.hash}`);
-      console.log(`Transaction Link: https://tonscan.org/tx/${result.hash}`);
-    }
 
     // ==========================
     // 🔹 إرسال إشعار تليجرام بعد الدفع الناجح مع الرابط
@@ -240,6 +254,7 @@ withdrawalsRef.on("child_added", async (snapshot) => {
   } catch (error) {
 
     console.log("Send error (kept pending):", error.message);
+    console.log("Error details:", error);
 
     // 🔥 يرجعها pending ولا يرفضها
     await withdrawalsRef.child(withdrawId).update({
