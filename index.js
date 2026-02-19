@@ -110,24 +110,28 @@ async function sendTelegramNotification(chatId, amount, transactionHash = null) 
 
   // إنشاء رابط المعاملة إذا كان الهاش موجوداً
   let transactionLink = '';
-  if (transactionHash) {
-    transactionLink = `https://tonscan.org/tx/${transactionHash}`;
-  }
-
-  // الرسالة المعدلة - مع الرابط وبدون العبارة الزائدة
-  const message = `✅ Withdrawal Successful! 🎉
+  let message = `✅ Withdrawal Successful! 🎉
 
 💰 Amount: ${amount} TON
-🔗 <a href="${transactionLink}">View on Tonscan</a>
 
 Your funds have been delivered.`;
+  
+  if (transactionHash) {
+    transactionLink = `https://tonscan.org/tx/${transactionHash}`;
+    // إضافة الرابط كاملاً في الرسالة
+    message = `✅ Withdrawal Successful! 🎉
+
+💰 Amount: ${amount} TON
+🔗 ${transactionLink}
+
+Your funds have been delivered.`;
+  }
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
   const payload = {
     chat_id: chatId,
     text: message,
     parse_mode: 'HTML',
-    disable_web_page_preview: false, // يسمح بمعاينة الرابط
   };
 
   try {
