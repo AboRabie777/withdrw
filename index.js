@@ -95,7 +95,7 @@ async function sendTON(toAddress, amount) {
 // 🔹 إرسال إشعار للمستخدم عبر تليجرام
 // ==========================
 
-async function sendTelegramNotification(chatId, amount, transactionHash) {
+async function sendTelegramNotification(chatId, amount) {
   // معرف البوت الخاص بك
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) {
@@ -109,25 +109,14 @@ async function sendTelegramNotification(chatId, amount, transactionHash) {
     return;
   }
 
-  // إنشاء رابط المعاملة
-  let transactionLink = "https://tonviewer.com/";
-  if (transactionHash) {
-    transactionLink = `https://tonviewer.com/transaction/${transactionHash}`;
-  } else {
-    // إذا لم نتمكن من الحصول على الـ hash، نعرض عنوان المحفظة كبديل
-    transactionLink = "https://tonviewer.com/";
-  }
-
-  const message = `💰 The payment of ${amount} TON has been successfully completed.
-
-🔎 View Transaction: ${transactionLink}`;
+  // الرسالة المطلوبة: فقط المبلغ بدون رابط
+  const message = `💰 The payment of ${amount} TON has been successfully completed.`;
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
   const payload = {
     chat_id: chatId,
     text: message,
     parse_mode: 'HTML',
-    disable_web_page_preview: false // لتمكين معاينة الرابط
   };
 
   try {
@@ -223,7 +212,8 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     // 🔹 إرسال إشعار تليجرام بعد الدفع الناجح
     // ==========================
     if (userId) {
-        await sendTelegramNotification(userId, data.netAmount, result.hash);
+        // ملاحظة: أزلنا result.hash من الدالة لأننا لا نريد الرابط
+        await sendTelegramNotification(userId, data.netAmount);
     } else {
         console.log(`ℹ️ Could not extract user ID from withdrawal ${withdrawId}. Skipping Telegram notification.`);
     }
