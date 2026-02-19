@@ -5,67 +5,55 @@ const { mnemonicToWalletKey } = require("@ton/crypto");
 const TelegramBot = require('node-telegram-bot-api');
 
 // ==========================
-// 🔹 منع إنهاء التطبيق (مهم جداً لـ Railway)
+// 🔹 منع إنهاء التطبيق
 // ==========================
 
 process.stdin.resume();
 
-// معالجة إشارات الإنهاء
+// تجاهل جميع إشارات الإنهاء
 process.on('SIGTERM', () => {
-  console.log('📴 Received SIGTERM - Continuing...');
-  // عدم إنهاء التطبيق
+  console.log('⚠️ Received SIGTERM - IGNORING');
 });
 
 process.on('SIGINT', () => {
-  console.log('📴 Received SIGINT - Continuing...');
-  // عدم إنهاء التطبيق
+  console.log('⚠️ Received SIGINT - IGNORING');
 });
 
-// رسالة Keep-alive كل دقيقة
+process.on('SIGQUIT', () => {
+  console.log('⚠️ Received SIGQUIT - IGNORING');
+});
+
+process.on('SIGHUP', () => {
+  console.log('⚠️ Received SIGHUP - IGNORING');
+});
+
+// Keep-alive كل 20 ثانية
 setInterval(() => {
-  console.log('💓 Bot heartbeat: ' + new Date().toISOString());
-}, 60000);
+  console.log('💓 BOT ALIVE - ' + new Date().toISOString());
+  
+  // كتابة ملف مؤقت لإثبات أن البوت شغال
+  const fs = require('fs');
+  try {
+    fs.writeFileSync('/tmp/bot-alive.txt', Date.now().toString());
+  } catch(e) {}
+}, 20000);
 
 // ==========================
-// 🔹 إعدادات الـ Logging (لتجنب Rate Limit)
+// 🔹 إعدادات الـ Logging
 // ==========================
 
 let logCounter = 0;
-const MAX_LOGS_PER_MINUTE = 100;
+const MAX_LOGS_PER_MINUTE = 50;
 
 function smartLog(...args) {
   logCounter++;
-  if (logCounter > MAX_LOGS_PER_MINUTE) {
-    if (logCounter === MAX_LOGS_PER_MINUTE + 1) {
-      console.log("⚠️ Too many logs, suppressing...");
-    }
-    return;
-  }
+  if (logCounter > MAX_LOGS_PER_MINUTE) return;
   console.log(...args);
 }
 
-// إعادة تعيين عداد الـ logs كل دقيقة
 setInterval(() => {
   logCounter = 0;
 }, 60000);
-
-// ==========================
-// 🔹 نص الترحيب
-// ==========================
-
-const WELCOME_TEXT = `🚜 Welcome to Crystal Ranch — a scarcity-based economy where early entry matters 👇
-
-🐄 Cow Machine is available to the first 1000 users only and produces ~1000 Milk per day, while 🐔 Chicken Machine unlocks after cows sell out, is also limited to the first 1000 users, and produces ~1000 Eggs per day.
-
-⚠️ Once the limit is reached, no new user can buy Cows or Chickens, and only early buyers will continue producing every hour.
-
-💎 Diamond Engine costs 5 TON and requires 20,000 Milk + 20,000 Eggs to produce 1 Diamond with a fixed price of 25 TON.
-
-🔥 This is where real power begins: any new user who wants to run the Diamond Engine will need Milk and Eggs… but where will they get them if Cow and Chicken machines are no longer available?
-
-📈 The only way is the market, and the early players who secured Cows and Chickens will control the Milk and Egg supply — and therefore control prices.
-
-Owning Milk and Eggs after sell-out is like owning a rare resource 💎 — early entry is the key to market control 🚀`;
 
 // ==========================
 // 🔹 Firebase
@@ -120,8 +108,9 @@ async function getWallet() {
     });
 
     const contract = client.open(wallet);
-    console.log("✅ Wallet loaded:", contract.address.toString().substring(0, 10) + "...");
-    return { contract, key, wallet };
+    const address = contract.address.toString();
+    console.log("✅ Wallet loaded:", address.substring(0, 10) + "...");
+    return { contract, key, wallet, address };
   } catch (error) {
     console.error("❌ Wallet error:", error.message);
     throw error;
@@ -138,10 +127,10 @@ async function sendTON(toAddress, amount) {
   
   const senderAddress = contract.address.toString();
   
-  smartLog(`💰 Sending ${amount} TON to ${toAddress.substring(0,8)}...`);
+  console.log(`💰 Sending ${amount} TON to ${toAddress.substring(0,8)}...`);
   
   if (amount < 0.2) {
-    smartLog(`⚠️ Small amount: ${amount} TON`);
+    console.log(`⚠️ Small amount: ${amount} TON`);
   }
   
   await contract.sendTransfer({
@@ -157,20 +146,11 @@ async function sendTON(toAddress, amount) {
     ],
   });
 
-  let transactionHash = null;
+  console.log(`✅ Transaction sent successfully`);
   
-  try {
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    const transactions = await contract.getTransactions(1);
-    if (transactions && transactions.length > 0) {
-      transactionHash = transactions[0].hash.toString('hex');
-      smartLog(`✅ Tx hash: ${transactionHash.substring(0,16)}...`);
-    }
-  } catch (error) {}
-
   return {
     status: "sent",
-    hash: transactionHash,
+    hash: null,
     fromAddress: senderAddress,
     toAddress: toAddress,
     amount: amount
@@ -190,7 +170,7 @@ async function sendUserNotification(chatId, amount, toAddress) {
   const userMessage = `✅ Withdrawal Successful! 🎉
 
 💰 Amount: ${amount} TON
-🔗 <a href="${walletLink}">View Transaction on Tonviewer</a>
+🔗 ${walletLink}
 
 Your funds have been delivered.`;
 
@@ -198,7 +178,6 @@ Your funds have been delivered.`;
   const payload = {
     chat_id: chatId,
     text: userMessage,
-    parse_mode: 'HTML',
   };
 
   try {
@@ -207,20 +186,25 @@ Your funds have been delivered.`;
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-
-    if (!response.ok) return false;
-    smartLog(`✅ Notif sent to ${chatId}`);
-    return true;
+    
+    if (response.ok) {
+      console.log(`✅ Notification sent to user ${chatId}`);
+      return true;
+    }
+    return false;
   } catch (error) {
     return false;
   }
 }
 
 // ==========================
-// 🔹 إرسال إشعار للقناة
+// 🔹 إرسال إشعار للقناة (معدل - مع الرابط الصحيح)
 // ==========================
 
-async function sendChannelNotification(amount, toAddress, userId, botToken) {
+async function sendChannelNotification(amount, toAddress, userId) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) return;
+  
   const channelId = "@Crystal_Ranch_chat";
   const walletLink = `https://tonviewer.com/${toAddress}`;
   
@@ -228,13 +212,56 @@ async function sendChannelNotification(amount, toAddress, userId, botToken) {
 
 🆔 User: \`${userId}\`
 💰 Amount: ${amount} TON
-🔗 <a href="${walletLink}">View</a>`;
+🔗 <a href="${walletLink}">View Transaction</a>`;
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
   const payload = {
     chat_id: channelId,
     text: channelMessage,
     parse_mode: 'HTML',
+    disable_web_page_preview: true
+  };
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    
+    const data = await response.json();
+    
+    if (data.ok && data.result) {
+      // الرابط الصحيح للرسالة في القناة
+      const messageLink = `https://t.me/Crystal_Ranch_chat/${data.result.message_id}`;
+      console.log(`✅ Channel notification sent: ${messageLink}`);
+      
+      // إرسال تأكيد إلى نفس القناة أو مجموعة المراقبة
+      await sendConfirmationMessage(messageLink, amount, userId);
+    } else {
+      console.log("❌ Failed to send channel notification:", data);
+    }
+  } catch (error) {
+    console.log("❌ Error sending channel notification:", error.message);
+  }
+}
+
+// ==========================
+// 🔹 إرسال رسالة تأكيد بالرابط (اختياري)
+// ==========================
+
+async function sendConfirmationMessage(messageLink, amount, userId) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) return;
+  
+  // يمكن إرسال تأكيد إلى نفس القناة أو إلى مجموعة منفصلة
+  const confirmMessage = `✅ Posted: ${messageLink}`;
+  
+  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+  const payload = {
+    chat_id: "@Crystal_Ranch_chat", // أو معرف مجموعة منفصلة
+    text: confirmMessage,
+    disable_web_page_preview: true
   };
 
   try {
@@ -243,29 +270,37 @@ async function sendChannelNotification(amount, toAddress, userId, botToken) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    console.log(`✅ Confirmation sent`);
   } catch (error) {}
 }
 
 // ==========================
-// 🔹 تشغيل بوت الترحيب
+// 🔹 بوت الترحيب
 // ==========================
 
 function startWelcomeBot() {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
-  
   if (!botToken) {
     console.log("⚠️ TELEGRAM_BOT_TOKEN missing - Welcome bot disabled");
-    return null;
+    return;
   }
   
   try {
     const welcomeBot = new TelegramBot(botToken, { polling: true });
     
+    const WELCOME_TEXT = `🚜 Welcome to Crystal Ranch — a scarcity-based economy where early entry matters 👇
+
+🐄 Cow Machine is available to the first 1000 users only
+🐔 Chicken Machine unlocks after cows sell out
+💎 Diamond Engine costs 5 TON
+
+Early entry is the key to market control 🚀`;
+
     // أمر /start
     welcomeBot.onText(/\/start/, async (msg) => {
       const chatId = msg.chat.id;
       
-      smartLog(`👋 New user: ${chatId}`);
+      console.log(`👋 New user started: ${chatId}`);
       
       const keyboard = {
         inline_keyboard: [
@@ -282,6 +317,7 @@ function startWelcomeBot() {
           reply_markup: keyboard,
           disable_web_page_preview: true
         });
+        console.log(`✅ Welcome sent to ${chatId}`);
       } catch (error) {}
     });
     
@@ -297,14 +333,11 @@ function startWelcomeBot() {
       await welcomeBot.sendMessage(chatId, "💎 Crystal Ranch\nApp: @Crystal_Ranch_bot\nChat: @Crystal_Ranch_chat");
     });
     
-    // تجاهل أخطاء polling
     welcomeBot.on('polling_error', () => {});
     
     console.log("✅ Welcome bot is running");
-    return welcomeBot;
   } catch (error) {
     console.log("❌ Failed to start welcome bot:", error.message);
-    return null;
   }
 }
 
@@ -317,7 +350,7 @@ let isProcessing = false;
 
 withdrawalsRef.on("child_added", async (snapshot) => {
   if (isProcessing) {
-    smartLog("⚠️ Already processing, skipping...");
+    console.log("⚠️ Already processing a withdrawal, skipping...");
     return;
   }
   
@@ -332,11 +365,13 @@ withdrawalsRef.on("child_added", async (snapshot) => {
       return;
     }
 
-    console.log(`\n🔄 Processing withdrawal: ${withdrawId}`);
+    console.log("\n" + "=".repeat(40));
+    console.log(`🔄 Processing withdrawal: ${withdrawId}`);
+    console.log("=".repeat(40));
 
     // ✅ حد أقصى 1 TON
     if (Number(data.netAmount) > 1) {
-      console.log(`⏭️ Amount >1 TON: ${data.netAmount}`);
+      console.log(`⏭️ Amount exceeds limit: ${data.netAmount} TON`);
       isProcessing = false;
       return;
     }
@@ -365,6 +400,7 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     });
 
     // إرسال TON
+    console.log(`💰 Sending ${data.netAmount} TON to ${data.address.substring(0,10)}...`);
     const result = await sendTON(data.address, data.netAmount);
 
     // تحديث إلى paid
@@ -374,26 +410,25 @@ withdrawalsRef.on("child_added", async (snapshot) => {
       toAddress: data.address
     };
     
-    if (result.hash) {
-      updateData.transactionHash = result.hash;
-      updateData.transactionLink = `https://tonviewer.com/transaction/${result.hash}`;
-    }
-
     await withdrawalsRef.child(withdrawId).update(updateData);
     console.log(`✅ Withdrawal completed: ${withdrawId}`);
 
     // إرسال الإشعارات
     if (userId) {
-      const userNotified = await sendUserNotification(userId, data.netAmount, data.address);
-      if (userNotified) {
-        const botToken = process.env.TELEGRAM_BOT_TOKEN;
-        await sendChannelNotification(data.netAmount, data.address, userId, botToken);
+      // إشعار المستخدم
+      const sent = await sendUserNotification(userId, data.netAmount, data.address);
+      
+      // إشعار القناة (بغض النظر عن نتيجة إشعار المستخدم)
+      if (sent) {
+        await sendChannelNotification(data.netAmount, data.address, userId);
+      } else {
+        // حتى لو فشل إشعار المستخدم، نرسل إشعار القناة
+        await sendChannelNotification(data.netAmount, data.address, userId);
       }
     }
 
   } catch (error) {
     console.log(`❌ Error: ${error.message}`);
-    // إعادة الحالة إلى pending في حالة الخطأ
     if (snapshot.key) {
       await withdrawalsRef.child(snapshot.key).update({
         status: "pending",
@@ -401,10 +436,22 @@ withdrawalsRef.on("child_added", async (snapshot) => {
       });
     }
   } finally {
-    // تأخير بين المعالجات
     setTimeout(() => {
       isProcessing = false;
+      console.log("✅ Ready for next withdrawal\n");
     }, 3000);
+  }
+});
+
+// ==========================
+// 🔹 التحقق من Firebase connection
+// ==========================
+
+db.ref(".info/connected").on("value", (snap) => {
+  if (snap.val() === true) {
+    console.log("📡 Firebase connected");
+  } else {
+    console.log("📡 Firebase disconnected");
   }
 });
 
@@ -412,11 +459,11 @@ withdrawalsRef.on("child_added", async (snapshot) => {
 // 🔹 تشغيل كل شيء
 // ==========================
 
-console.log("\n" + "=".repeat(40));
-console.log("🚀 Crystal Ranch Bot Starting...");
-console.log("=".repeat(40));
+console.log("\n" + "=".repeat(50));
+console.log("🚀 CRYSTAL RANCH BOT STARTING...");
+console.log("=".repeat(50));
 
-// التحقق من المتغيرات الأساسية
+// التحقق من المتغيرات البيئية
 console.log("\n📋 Environment Check:");
 console.log(`FIREBASE: ${process.env.FIREBASE_SERVICE_ACCOUNT ? '✅' : '❌'}`);
 console.log(`TON_API_KEY: ${process.env.TON_API_KEY ? '✅' : '❌'}`);
@@ -424,14 +471,15 @@ console.log(`TON_MNEMONIC: ${process.env.TON_MNEMONIC ? '✅' : '❌'}`);
 console.log(`TELEGRAM_BOT_TOKEN: ${process.env.TELEGRAM_BOT_TOKEN ? '✅' : '❌'}`);
 
 // تشغيل بوت الترحيب
+console.log("\n🤖 Starting Welcome Bot...");
 startWelcomeBot();
 
-// التحقق من المحفظة
+// تحميل المحفظة
+console.log("\n💰 Loading TON Wallet...");
 getWallet().catch(err => {
-  console.error("❌ Failed to load wallet:", err.message);
+  console.error("❌ Wallet error:", err.message);
 });
 
 console.log("\n💸 TON Auto Withdraw Running (Max 1 TON)");
-console.log("✅ Bounce enabled to reduce spam");
-console.log("⚠️ Amounts <0.2 TON may be marked as spam");
-console.log("=".repeat(40) + "\n");
+console.log("✅ Channel links will be: https://t.me/Crystal_Ranch_chat/[message_id]");
+console.log("=".repeat(50) + "\n");
