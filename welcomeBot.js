@@ -2,23 +2,6 @@ require("dotenv").config();
 const TelegramBot = require('node-telegram-bot-api');
 
 // ==========================
-// 🔹 إعدادات الـ Logging
-// ==========================
-
-let logCounter = 0;
-const MAX_LOGS_PER_MINUTE = 50;
-
-function smartLog(...args) {
-  logCounter++;
-  if (logCounter > MAX_LOGS_PER_MINUTE) return;
-  console.log(...args);
-}
-
-setInterval(() => {
-  logCounter = 0;
-}, 60000);
-
-// ==========================
 // 🔹 نص الترحيب
 // ==========================
 
@@ -44,65 +27,59 @@ function startWelcomeBot() {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   
   if (!botToken) {
-    console.error("❌ TELEGRAM_BOT_TOKEN missing");
+    console.log("❌ TELEGRAM_BOT_TOKEN missing - Welcome bot disabled");
     return null;
   }
   
-  const welcomeBot = new TelegramBot(botToken, { polling: true });
-  
-  // أمر /start
-  welcomeBot.onText(/\/start/, async (msg) => {
-    const chatId = msg.chat.id;
+  try {
+    const welcomeBot = new TelegramBot(botToken, { polling: true });
     
-    smartLog(`👋 New user: ${chatId}`);
-    
-    const keyboard = {
-      inline_keyboard: [
-        [{ text: "🚀 Open App", url: "https://t.me/Crystal_Ranch_bot?startapp=" }],
-        [
-          { text: "💬 Chat", url: "https://t.me/Crystal_Ranch_chat" },
-          { text: "📢 Channel", url: "https://t.me/earnmoney139482" }
+    // أمر /start
+    welcomeBot.onText(/\/start/, async (msg) => {
+      const chatId = msg.chat.id;
+      console.log(`👋 New user: ${chatId}`);
+      
+      const keyboard = {
+        inline_keyboard: [
+          [{ text: "🚀 Open App", url: "https://t.me/Crystal_Ranch_bot?startapp=" }],
+          [
+            { text: "💬 Chat", url: "https://t.me/Crystal_Ranch_chat" },
+            { text: "📢 Channel", url: "https://t.me/earnmoney139482" }
+          ]
         ]
-      ]
-    };
+      };
+      
+      try {
+        await welcomeBot.sendMessage(chatId, WELCOME_TEXT, {
+          reply_markup: keyboard,
+          disable_web_page_preview: true
+        });
+      } catch (error) {}
+    });
     
-    try {
-      await welcomeBot.sendMessage(chatId, WELCOME_TEXT, {
-        reply_markup: keyboard,
-        disable_web_page_preview: true
-      });
-    } catch (error) {
-      smartLog(`❌ Error: ${error.message}`);
-    }
-  });
-  
-  // أمر /help
-  welcomeBot.onText(/\/help/, async (msg) => {
-    const chatId = msg.chat.id;
-    const helpText = `/start - Welcome message
-/help - This help
-/about - About`;
+    // أمر /help
+    welcomeBot.onText(/\/help/, async (msg) => {
+      const chatId = msg.chat.id;
+      await welcomeBot.sendMessage(chatId, "/start - Welcome\n/help - Help\n/about - About");
+    });
     
-    await welcomeBot.sendMessage(chatId, helpText);
-  });
-  
-  // أمر /about
-  welcomeBot.onText(/\/about/, async (msg) => {
-    const chatId = msg.chat.id;
-    const aboutText = `💎 Crystal Ranch
-App: @Crystal_Ranch_bot
-Chat: @Crystal_Ranch_chat`;
+    // أمر /about
+    welcomeBot.onText(/\/about/, async (msg) => {
+      const chatId = msg.chat.id;
+      await welcomeBot.sendMessage(chatId, "💎 Crystal Ranch\nApp: @Crystal_Ranch_bot\nChat: @Crystal_Ranch_chat");
+    });
     
-    await welcomeBot.sendMessage(chatId, aboutText);
-  });
-  
-  // معالجة الأخطاء بصمت
-  welcomeBot.on('polling_error', () => {});
-  
-  smartLog("✅ Welcome bot active");
-  return welcomeBot;
+    welcomeBot.on('polling_error', () => {});
+    
+    console.log("✅ Welcome bot is running");
+    return welcomeBot;
+  } catch (error) {
+    console.log("❌ Failed to start welcome bot:", error.message);
+    return null;
+  }
 }
 
+// تشغيل البوت إذا تم تشغيل الملف مباشرة
 if (require.main === module) {
   startWelcomeBot();
 }
