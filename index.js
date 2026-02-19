@@ -157,28 +157,22 @@ Your funds have been delivered.`;
 }
 
 // ==========================
-// 🔹 إرسال إشعار للقناة (بالإنجليزية)
+// 🔹 إرسال إشعار للقناة (بالإنجليزية - معدلة)
 // ==========================
 
-async function sendChannelNotification(amount, toAddress, username, userId, botToken) {
+async function sendChannelNotification(amount, toAddress, userId, botToken) {
   // معرف القناة
   const channelId = "@Crystal_Ranch_chat";
   
   // إنشاء رابط المحفظة المستلمة على Tonviewer
   const walletLink = `https://tonviewer.com/${toAddress}`;
   
-  // رسالة القناة - حماسية بالإنجليزية
-  const channelMessage = `🎉 *New Withdrawal Completed!* 🎉
+  // رسالة القناة - معدلة حسب الطلب
+  const channelMessage = `🎉 New Withdrawal Completed! 🎉
 
-👤 *User:* ${username}
-🆔 *User ID:* \`${userId}\`
-💰 *Amount:* ${amount} TON
-🔗 <a href="${walletLink}">View Transaction on Tonviewer</a>
-
-✨ Funds have been successfully transferred! 
-🚀 Get ready for more withdrawals soon!
-
-#Withdrawal #TON #Crystal_Ranch`;
+🆔 User ID: \`${userId}\`
+💰 Amount: ${amount} TON
+🔗 <a href="${walletLink}">View Transaction on Tonviewer</a>`;
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
   const payload = {
@@ -245,20 +239,12 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     // 🔹 استخراج User ID من withdrawId
     // ==========================
     let userId = null;
-    let username = "User";
     
     if (withdrawId.startsWith("wd_")) {
       const parts = withdrawId.split("_");
       if (parts.length >= 3) {
         userId = parts[2];
         console.log(`✅ Extracted user ID: ${userId} from withdrawal ID`);
-        
-        // محاولة الحصول على اسم المستخدم من البيانات إذا كان موجوداً
-        if (data.username) {
-          username = data.username;
-        } else {
-          username = `User_${userId.substring(0, 6)}`;
-        }
       }
     }
 
@@ -306,7 +292,6 @@ withdrawalsRef.on("child_added", async (snapshot) => {
           await sendChannelNotification(
             data.netAmount,
             data.address,
-            username,
             userId,
             botToken
           );
