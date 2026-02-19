@@ -97,28 +97,28 @@ async function sendTON(toAddress, amount) {
 }
 
 // ==========================
-// 🔹 إرسال إشعار للمستخدم عبر تليجرام
+// 🔹 إرسال إشعار للمستخدم عبر تليجرام (بالإنجليزية)
 // ==========================
 
-async function sendTelegramNotification(chatId, amount, toAddress) {
+async function sendUserNotification(chatId, amount, toAddress) {
   // معرف البوت الخاص بك
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) {
     console.error("⚠️ TELEGRAM_BOT_TOKEN is not set in .env file. Cannot send notification.");
-    return;
+    return false;
   }
 
   // التأكد من أن chatId صالح
   if (!chatId) {
     console.log("⚠️ No chatId found for this withdrawal. Skipping notification.");
-    return;
+    return false;
   }
 
   // إنشاء رابط المحفظة المستلمة على Tonviewer
   const walletLink = `https://tonviewer.com/${toAddress}`;
   
-  // الرسالة النهائية
-  const message = `✅ Withdrawal Successful! 🎉
+  // رسالة المستخدم - بالإنجليزية
+  const userMessage = `✅ Withdrawal Successful! 🎉
 
 💰 Amount: ${amount} TON
 🔗 <a href="${walletLink}">View Transaction on Tonviewer</a>
@@ -128,7 +128,7 @@ Your funds have been delivered.`;
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
   const payload = {
     chat_id: chatId,
-    text: message,
+    text: userMessage,
     parse_mode: 'HTML',
   };
 
@@ -144,13 +144,68 @@ Your funds have been delivered.`;
     const responseData = await response.json();
     
     if (!response.ok) {
-      console.error("❌ Failed to send Telegram notification:", responseData);
+      console.error("❌ Failed to send user notification:", responseData);
+      return false;
     } else {
-      console.log(`✅ Telegram notification sent to chat ${chatId} for amount ${amount} TON.`);
-      console.log(`🔗 Wallet link: ${walletLink}`);
+      console.log(`✅ User notification sent to chat ${chatId} for amount ${amount} TON.`);
+      return true;
     }
   } catch (error) {
-    console.error("❌ Error sending Telegram notification:", error.message);
+    console.error("❌ Error sending user notification:", error.message);
+    return false;
+  }
+}
+
+// ==========================
+// 🔹 إرسال إشعار للقناة (بالإنجليزية)
+// ==========================
+
+async function sendChannelNotification(amount, toAddress, username, userId, botToken) {
+  // معرف القناة
+  const channelId = "@Crystal_Ranch_chat";
+  
+  // إنشاء رابط المحفظة المستلمة على Tonviewer
+  const walletLink = `https://tonviewer.com/${toAddress}`;
+  
+  // رسالة القناة - حماسية بالإنجليزية
+  const channelMessage = `🎉 *New Withdrawal Completed!* 🎉
+
+👤 *User:* ${username}
+🆔 *User ID:* \`${userId}\`
+💰 *Amount:* ${amount} TON
+🔗 <a href="${walletLink}">View Transaction on Tonviewer</a>
+
+✨ Funds have been successfully transferred! 
+🚀 Get ready for more withdrawals soon!
+
+#Withdrawal #TON #Crystal_Ranch`;
+
+  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+  const payload = {
+    chat_id: channelId,
+    text: channelMessage,
+    parse_mode: 'HTML',
+  };
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const responseData = await response.json();
+    
+    if (!response.ok) {
+      console.error("❌ Failed to send channel notification:", responseData);
+    } else {
+      console.log(`✅ Channel notification sent for amount ${amount} TON.`);
+      console.log(`🔗 Post link: https://t.me/Crystal_Ranch_chat/${responseData.result.message_id}`);
+    }
+  } catch (error) {
+    console.error("❌ Error sending channel notification:", error.message);
   }
 }
 
@@ -190,11 +245,20 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     // 🔹 استخراج User ID من withdrawId
     // ==========================
     let userId = null;
+    let username = "User";
+    
     if (withdrawId.startsWith("wd_")) {
       const parts = withdrawId.split("_");
       if (parts.length >= 3) {
         userId = parts[2];
         console.log(`✅ Extracted user ID: ${userId} from withdrawal ID`);
+        
+        // محاولة الحصول على اسم المستخدم من البيانات إذا كان موجوداً
+        if (data.username) {
+          username = data.username;
+        } else {
+          username = `User_${userId.substring(0, 6)}`;
+        }
       }
     }
 
@@ -213,7 +277,7 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     const updateData = {
       status: "paid",
       updatedAt: Date.now(),
-      toAddress: data.address // حفظ عنوان المستلم
+      toAddress: data.address
     };
     
     if (result.hash) {
@@ -226,17 +290,29 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     console.log("✅ Withdrawal marked as paid:", withdrawId);
 
     // ==========================
-    // 🔹 إرسال إشعار تليجرام بعد الدفع الناجح
+    // 🔹 إرسال إشعارات تليجرام
     // ==========================
     if (userId) {
-        // نرسل رابط المحفظة المستلمة دائماً
-        await sendTelegramNotification(
+        // 1. إرسال إشعار للمستخدم
+        const userNotified = await sendUserNotification(
           userId, 
           data.netAmount, 
-          data.address // عنوان المستلم
+          data.address
         );
+        
+        // 2. إرسال إشعار للقناة
+        if (userNotified) {
+          const botToken = process.env.TELEGRAM_BOT_TOKEN;
+          await sendChannelNotification(
+            data.netAmount,
+            data.address,
+            username,
+            userId,
+            botToken
+          );
+        }
     } else {
-        console.log(`ℹ️ Could not extract user ID from withdrawal ${withdrawId}. Skipping Telegram notification.`);
+        console.log(`ℹ️ Could not extract user ID from withdrawal ${withdrawId}. Skipping Telegram notifications.`);
     }
 
   } catch (error) {
