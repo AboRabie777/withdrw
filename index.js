@@ -70,6 +70,60 @@ async function sendTON(toAddress, amount) {
 }
 
 // ==========================
+// 🔹 إرسال إشعار للمستخدم عبر تليجرام
+// ==========================
+
+async function sendTelegramNotification(chatId, amount) {
+  // معرف البوت الخاص بك (تحتاج إلى تخزينه في متغيرات البيئة)
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) {
+    console.error("⚠️ TELEGRAM_BOT_TOKEN is not set in .env file. Cannot send notification.");
+    return;
+  }
+
+  // التأكد من أن chatId صالح
+  if (!chatId) {
+    console.log("⚠️ No chatId found for this withdrawal. Skipping notification.");
+    return;
+  }
+
+  // إنشاء رابط عرض المعاملة (اختياري)
+  // لا يمكننا الحصول على رابط المعاملة بسهولة هنا، لذلك سنتركه عاماً أو نضيفه لاحقاً
+  // const transactionLink = `https://tonscan.org/tx/...`; 
+
+  const message = `💰 The payment of ${amount} TON has been successfully completed.
+
+🔎 View on TON Viewer (https://tonviewer.com/)`; // رابط عام للموقع
+
+  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+  const payload = {
+    chat_id: chatId,
+    text: message,
+    parse_mode: 'HTML', // أو 'Markdown' إذا أردت تنسيق النص
+  };
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      console.error("❌ Failed to send Telegram notification:", errorData);
+    } else {
+      console.log(`✅ Telegram notification sent to chat ${chatId} for amount ${amount} TON.`);
+    }
+  } catch (error) {
+    console.error("❌ Error sending Telegram notification:", error.message);
+  }
+}
+
+
+// ==========================
 // 🔹 مراقبة السحوبات
 // ==========================
 
@@ -106,12 +160,25 @@ withdrawalsRef.on("child_added", async (snapshot) => {
 
     await sendTON(data.address, data.netAmount);
 
+    // تحديث الحالة إلى "paid"
     await withdrawalsRef.child(withdrawId).update({
       status: "paid",
       updatedAt: Date.now(),
     });
 
     console.log("Paid:", withdrawId);
+
+    // ==========================
+    // 🔹 إرسال إشعار تليجرام بعد الدفع الناجح
+    // ==========================
+    // تأكد من أن لديك حقل 'chatId' في بيانات السحب (data.chatId)
+    // إذا كان اسم الحقل مختلفاً (مثل 'userId' أو 'telegramId')، غيّره هنا.
+    if (data.chatId) {
+        await sendTelegramNotification(data.chatId, data.netAmount);
+    } else {
+        console.log(`ℹ️ No chatId found for withdrawal ${withdrawId}. Skipping Telegram notification.`);
+    }
+
 
   } catch (error) {
 
