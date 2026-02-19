@@ -55,6 +55,7 @@ async function sendTON(toAddress, amount) {
   const senderAddress = contract.address.toString();
   
   console.log(`Sending ${amount} TON to ${toAddress}...`);
+  console.log(`Sender address: ${senderAddress}`);
   
   // إرسال المعاملة
   const transfer = await contract.sendTransfer({
@@ -65,7 +66,7 @@ async function sendTON(toAddress, amount) {
         to: toAddress,
         value: toNano(String(amount)),
         bounce: false,
-        body: "@Crystal_Ranch_bot" // 🔥 التعليق
+        body: "@Crystal_Ranch_bot"
       }),
     ],
   });
@@ -74,16 +75,13 @@ async function sendTON(toAddress, amount) {
   let transactionHash = null;
   
   try {
-    // انتظار ثانية للتأكد من تسجيل المعاملة
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    console.log("Waiting for transaction to be recorded...");
+    await new Promise(resolve => setTimeout(resolve, 3000));
     
-    // محاولة الحصول على آخر معاملة للمحفظة
     const transactions = await contract.getTransactions(1);
     if (transactions && transactions.length > 0) {
       transactionHash = transactions[0].hash.toString('hex');
       console.log(`✅ Transaction hash obtained: ${transactionHash}`);
-    } else {
-      console.log("⚠️ No transactions found after sending");
     }
   } catch (error) {
     console.log("Could not fetch transaction hash:", error.message);
@@ -102,7 +100,7 @@ async function sendTON(toAddress, amount) {
 // 🔹 إرسال إشعار للمستخدم عبر تليجرام
 // ==========================
 
-async function sendTelegramNotification(chatId, amount, transactionHash = null) {
+async function sendTelegramNotification(chatId, amount, toAddress) {
   // معرف البوت الخاص بك
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) {
@@ -116,31 +114,16 @@ async function sendTelegramNotification(chatId, amount, transactionHash = null) 
     return;
   }
 
-  let message = '';
-  let transactionLink = '';
+  // إنشاء رابط المحفظة المستلمة على Tonviewer
+  const walletLink = `https://tonviewer.com/${toAddress}`;
   
-  if (transactionHash) {
-    transactionLink = `https://tonscan.org/tx/${transactionHash}`;
-    message = `✅ Withdrawal Successful! 🎉
+  // الرسالة النهائية
+  const message = `✅ Withdrawal Successful! 🎉
 
 💰 Amount: ${amount} TON
-🔗 ${transactionLink}
+🔗 <a href="${walletLink}">View Transaction on Tonviewer</a>
 
 Your funds have been delivered.`;
-    
-    console.log(`🔗 Sending link: ${transactionLink}`);
-  } else {
-    // رسالة بدون رابط إذا لم يكن هناك هاش
-    message = `✅ Withdrawal Successful! 🎉
-
-💰 Amount: ${amount} TON
-
-Your funds have been delivered.
-
-Note: Transaction hash not available yet.`;
-    
-    console.log("⚠️ No transaction hash available for notification");
-  }
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
   const payload = {
@@ -158,11 +141,13 @@ Note: Transaction hash not available yet.`;
       body: JSON.stringify(payload),
     });
 
+    const responseData = await response.json();
+    
     if (!response.ok) {
-      const errorData = await response.json();
-      console.error("❌ Failed to send Telegram notification:", errorData);
+      console.error("❌ Failed to send Telegram notification:", responseData);
     } else {
       console.log(`✅ Telegram notification sent to chat ${chatId} for amount ${amount} TON.`);
+      console.log(`🔗 Wallet link: ${walletLink}`);
     }
   } catch (error) {
     console.error("❌ Error sending Telegram notification:", error.message);
@@ -177,20 +162,22 @@ const withdrawalsRef = db.ref("withdrawals");
 
 withdrawalsRef.on("child_added", async (snapshot) => {
 
-  const withdrawId = snapshot.key; // مثلاً: wd_1771515897654_6970148965
+  const withdrawId = snapshot.key;
   const data = snapshot.val();
 
   if (!data || data.status !== "pending") return;
 
   try {
 
-    console.log("Processing:", withdrawId);
+    console.log("\n=====================");
+    console.log("Processing withdrawal:", withdrawId);
     console.log("Withdrawal data:", JSON.stringify(data, null, 2));
+    console.log("=====================\n");
 
     // ✅ حد أقصى 1 TON
     if (Number(data.netAmount) > 1) {
       console.log("Amount exceeds auto limit. Leaving pending.");
-      return; // يظل pending
+      return;
     }
 
     // ✅ تحقق من العنوان
@@ -206,7 +193,6 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     if (withdrawId.startsWith("wd_")) {
       const parts = withdrawId.split("_");
       if (parts.length >= 3) {
-        // parts[1] هو timestamp، parts[2] هو userId
         userId = parts[2];
         console.log(`✅ Extracted user ID: ${userId} from withdrawal ID`);
       }
@@ -221,42 +207,44 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     // إرسال TON والحصول على تفاصيل المعاملة
     const result = await sendTON(data.address, data.netAmount);
     
-    console.log("SendTON result:", JSON.stringify(result, null, 2));
+    console.log("\n📦 SendTON result:", JSON.stringify(result, null, 2));
 
-    // تحديث الحالة إلى "paid" مع حفظ رابط المعاملة
+    // تحديث الحالة إلى "paid"
     const updateData = {
       status: "paid",
       updatedAt: Date.now(),
+      toAddress: data.address // حفظ عنوان المستلم
     };
     
     if (result.hash) {
       updateData.transactionHash = result.hash;
-      updateData.transactionLink = `https://tonscan.org/tx/${result.hash}`;
+      updateData.transactionLink = `https://tonviewer.com/transaction/${result.hash}`;
       console.log(`✅ Transaction hash saved: ${result.hash}`);
-    } else {
-      console.log("⚠️ No transaction hash from sendTON");
     }
 
     await withdrawalsRef.child(withdrawId).update(updateData);
-
-    console.log("Paid:", withdrawId);
+    console.log("✅ Withdrawal marked as paid:", withdrawId);
 
     // ==========================
-    // 🔹 إرسال إشعار تليجرام بعد الدفع الناجح مع الرابط
+    // 🔹 إرسال إشعار تليجرام بعد الدفع الناجح
     // ==========================
     if (userId) {
-        // تمرير رابط المعاملة للإشعار
-        await sendTelegramNotification(userId, data.netAmount, result.hash);
+        // نرسل رابط المحفظة المستلمة دائماً
+        await sendTelegramNotification(
+          userId, 
+          data.netAmount, 
+          data.address // عنوان المستلم
+        );
     } else {
         console.log(`ℹ️ Could not extract user ID from withdrawal ${withdrawId}. Skipping Telegram notification.`);
     }
 
   } catch (error) {
 
-    console.log("Send error (kept pending):", error.message);
+    console.log("❌ Send error:", error.message);
     console.log("Error details:", error);
 
-    // 🔥 يرجعها pending ولا يرفضها
+    // إعادة الحالة إلى pending
     await withdrawalsRef.child(withdrawId).update({
       status: "pending",
       updatedAt: Date.now(),
