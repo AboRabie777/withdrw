@@ -47,6 +47,49 @@ setInterval(() => {
 }, 60000);
 
 // ==========================
+// 🔹 دالة تقريب المبلغ (حل المشكلة)
+// ==========================
+
+function roundAmount(amount) {
+  try {
+    // تحويل المدخلات المختلفة إلى رقم
+    let numAmount;
+    
+    if (typeof amount === 'string') {
+      numAmount = parseFloat(amount);
+    } else if (typeof amount === 'number') {
+      numAmount = amount;
+    } else {
+      numAmount = Number(amount);
+    }
+    
+    // التحقق من صحة الرقم
+    if (isNaN(numAmount) || numAmount <= 0) {
+      console.log(`❌ Invalid amount: ${amount}`);
+      return 0;
+    }
+    
+    // تقريب الرقم إلى منزلتين عشريتين فقط
+    // استخدام Math.floor للحصول على أول رقمين فقط بدون تقريب
+    const rounded = Math.floor(numAmount * 100) / 100;
+    
+    // منع الأرقام الصغيرة جداً
+    if (rounded < 0.01) {
+      console.log(`⚠️ Amount too small: ${rounded} TON`);
+      return 0.01; // حد أدنى 0.01 TON
+    }
+    
+    console.log(`💰 Original amount: ${numAmount}`);
+    console.log(`💰 Rounded amount: ${rounded}`);
+    
+    return rounded;
+  } catch (error) {
+    console.log(`❌ Error in roundAmount: ${error.message}`);
+    return 0.01; // قيمة افتراضية آمنة في حالة الخطأ
+  }
+}
+
+// ==========================
 // 🔹 Firebase
 // ==========================
 
@@ -109,43 +152,59 @@ async function getWallet() {
 }
 
 // ==========================
-// 🔹 إرسال TON
+// 🔹 إرسال TON (معدل لحل المشكلة)
 // ==========================
 
 async function sendTON(toAddress, amount) {
-  const { contract, key } = await getWallet();
-  const seqno = await contract.getSeqno();
-  
-  const senderAddress = contract.address.toString();
-  
-  console.log(`💰 Sending ${amount} TON to ${toAddress.substring(0,8)}...`);
-  
-  if (amount < 0.2) {
-    console.log(`⚠️ Small amount: ${amount} TON`);
-  }
-  
-  await contract.sendTransfer({
-    secretKey: key.secretKey,
-    seqno: seqno,
-    messages: [
-      internal({
-        to: toAddress,
-        value: toNano(String(amount)),
-        bounce: true,
-        body: "Withdrawal from @Crystal_Ranch_bot"
-      }),
-    ],
-  });
+  try {
+    // تقريب المبلغ أولاً
+    const roundedAmount = roundAmount(amount);
+    
+    // التحقق من صحة المبلغ بعد التقريب
+    if (roundedAmount <= 0) {
+      throw new Error(`Invalid amount after rounding: ${roundedAmount}`);
+    }
+    
+    const { contract, key } = await getWallet();
+    const seqno = await contract.getSeqno();
+    
+    const senderAddress = contract.address.toString();
+    
+    console.log(`💰 Sending ${roundedAmount} TON to ${toAddress.substring(0,10)}...`);
+    
+    if (roundedAmount < 0.2) {
+      console.log(`⚠️ Small amount: ${roundedAmount} TON`);
+    }
+    
+    // تحويل المبلغ المقرب إلى nano TON
+    const nanoAmount = toNano(roundedAmount.toFixed(2));
+    
+    await contract.sendTransfer({
+      secretKey: key.secretKey,
+      seqno: seqno,
+      messages: [
+        internal({
+          to: toAddress,
+          value: nanoAmount,
+          bounce: true,
+          body: "Withdrawal from @Crystal_Ranch_bot"
+        }),
+      ],
+    });
 
-  console.log(`✅ Transaction sent successfully`);
-  
-  return {
-    status: "sent",
-    hash: null,
-    fromAddress: senderAddress,
-    toAddress: toAddress,
-    amount: amount
-  };
+    console.log(`✅ Transaction sent successfully`);
+    
+    return {
+      status: "sent",
+      hash: null,
+      fromAddress: senderAddress,
+      toAddress: toAddress,
+      amount: roundedAmount
+    };
+  } catch (error) {
+    console.log(`❌ Error in sendTON: ${error.message}`);
+    throw error;
+  }
 }
 
 // ==========================
@@ -200,8 +259,7 @@ async function sendChannelNotification(amount, toAddress, userId) {
   const chatId = "@Crystal_Ranch_chat";
   
   // معرف الموضوع الصحيح لـ "Withdrawals & deposit 💰"
-  // من الرابط: https://t.me/Crystal_Ranch_chat/5
-  const topicId = 5; // هذا هو الرقم الصحيح من الرابط
+  const topicId = 5;
   
   const walletLink = `https://tonviewer.com/${toAddress}`;
   
@@ -217,7 +275,7 @@ async function sendChannelNotification(amount, toAddress, userId) {
     text: channelMessage,
     parse_mode: 'HTML',
     disable_web_page_preview: true,
-    message_thread_id: topicId // هذا هو المفتاح! يحدد الموضوع
+    message_thread_id: topicId
   };
 
   try {
@@ -230,11 +288,8 @@ async function sendChannelNotification(amount, toAddress, userId) {
     const data = await response.json();
     
     if (data.ok && data.result) {
-      // الرابط الصحيح للرسالة في الموضوع
       const messageLink = `https://t.me/Crystal_Ranch_chat/${topicId}/${data.result.message_id}`;
       console.log(`✅ Channel notification sent to topic #${topicId}: ${messageLink}`);
-      
-      // إرسال تأكيد简短
       console.log(`📬 Message posted in Withdrawals topic`);
     } else {
       console.log("❌ Failed to send channel notification:", data);
@@ -339,9 +394,12 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     console.log(`🔄 Processing withdrawal: ${withdrawId}`);
     console.log("=".repeat(40));
 
-    // ✅ حد أقصى 1 TON
-    if (Number(data.netAmount) > 1) {
-      console.log(`⏭️ Amount exceeds limit: ${data.netAmount} TON`);
+    // ✅ تقريب المبلغ قبل التحقق من الحد الأقصى
+    const roundedAmount = roundAmount(data.netAmount);
+    
+    // ✅ حد أقصى 1 TON (بعد التقريب)
+    if (roundedAmount > 1) {
+      console.log(`⏭️ Amount exceeds limit: ${roundedAmount} TON`);
       isProcessing = false;
       return;
     }
@@ -369,15 +427,17 @@ withdrawalsRef.on("child_added", async (snapshot) => {
       updatedAt: Date.now(),
     });
 
-    // إرسال TON
-    console.log(`💰 Sending ${data.netAmount} TON to ${data.address.substring(0,10)}...`);
-    await sendTON(data.address, data.netAmount);
+    // إرسال TON (بالمبلغ المقرب)
+    console.log(`💰 Sending ${roundedAmount} TON to ${data.address.substring(0,10)}...`);
+    await sendTON(data.address, roundedAmount);
 
     // تحديث إلى paid
     const updateData = {
       status: "paid",
       updatedAt: Date.now(),
-      toAddress: data.address
+      toAddress: data.address,
+      originalAmount: data.netAmount,
+      sentAmount: roundedAmount // حفظ المبلغ الذي تم إرساله فعلياً
     };
     
     await withdrawalsRef.child(withdrawId).update(updateData);
@@ -386,10 +446,10 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     // إرسال الإشعارات
     if (userId) {
       // إشعار المستخدم
-      await sendUserNotification(userId, data.netAmount, data.address);
+      await sendUserNotification(userId, roundedAmount, data.address);
       
-      // إشعار القناة في الموضوع الصحيح (رقم 5)
-      await sendChannelNotification(data.netAmount, data.address, userId);
+      // إشعار القناة في الموضوع الصحيح
+      await sendChannelNotification(roundedAmount, data.address, userId);
     }
 
   } catch (error) {
@@ -398,6 +458,7 @@ withdrawalsRef.on("child_added", async (snapshot) => {
       await withdrawalsRef.child(snapshot.key).update({
         status: "pending",
         updatedAt: Date.now(),
+        error: error.message
       });
     }
   } finally {
