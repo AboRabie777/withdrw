@@ -398,7 +398,7 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     const roundedAmount = roundAmount(data.netAmount);
     
     // ✅ حد أقصى 1 TON (بعد التقريب)
-    if (roundedAmount > 1) {
+    if (roundedAmount > 10) {
       console.log(`⏭️ Amount exceeds limit: ${roundedAmount} TON`);
       isProcessing = false;
       return;
