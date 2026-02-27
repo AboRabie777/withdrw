@@ -320,7 +320,7 @@ async function sendTONWithRetry(toAddress, amount, retryCount = 0) {
           to: toAddress,
           value: nanoAmount,
           bounce: true, // رجوع للـ true لأنك كنت مستخدم bounce
-          body: "Withdrawal from @Crystal_Ranch_bot" // ✅ تم إعادة النص الأصلي
+          body: "@Crystal_Ranch_bot" // ✅ تم إعادة النص الأصلي
         }),
       ],
     });
