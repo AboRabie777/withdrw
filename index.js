@@ -47,12 +47,19 @@ setInterval(() => {
 }, 60000);
 
 // ==========================
-// 🔹 دالة تقريب المبلغ (حل المشكلة)
+// 🔹 إعدادات التذكير
+// ==========================
+
+const ADMIN_CHAT_ID = "6970148965"; // ايدي التليجرام الخاص بك
+let lastBalanceWarningTime = 0;
+const BALANCE_WARNING_INTERVAL = 30 * 60 * 1000; // 30 دقيقة بين كل تذكير
+
+// ==========================
+// 🔹 دالة تقريب المبلغ
 // ==========================
 
 function roundAmount(amount) {
   try {
-    // تحويل المدخلات المختلفة إلى رقم
     let numAmount;
     
     if (typeof amount === 'string') {
@@ -63,20 +70,16 @@ function roundAmount(amount) {
       numAmount = Number(amount);
     }
     
-    // التحقق من صحة الرقم
     if (isNaN(numAmount) || numAmount <= 0) {
       console.log(`❌ Invalid amount: ${amount}`);
       return 0;
     }
     
-    // تقريب الرقم إلى منزلتين عشريتين فقط
-    // استخدام Math.floor للحصول على أول رقمين فقط بدون تقريب
     const rounded = Math.floor(numAmount * 100) / 100;
     
-    // منع الأرقام الصغيرة جداً
     if (rounded < 0.01) {
       console.log(`⚠️ Amount too small: ${rounded} TON`);
-      return 0.01; // حد أدنى 0.01 TON
+      return 0.01;
     }
     
     console.log(`💰 Original amount: ${numAmount}`);
@@ -85,7 +88,7 @@ function roundAmount(amount) {
     return rounded;
   } catch (error) {
     console.log(`❌ Error in roundAmount: ${error.message}`);
-    return 0.01; // قيمة افتراضية آمنة في حالة الخطأ
+    return 0.01;
   }
 }
 
@@ -128,11 +131,23 @@ const client = new TonClient({
 });
 
 // ==========================
+// 🔹 متغيرات المحفظة العامة
+// ==========================
+
+let walletContract = null;
+let walletKey = null;
+let walletAddress = null;
+
+// ==========================
 // 🔹 إنشاء المحفظة W5
 // ==========================
 
 async function getWallet() {
   try {
+    if (walletContract && walletKey && walletAddress) {
+      return { contract: walletContract, key: walletKey, address: walletAddress };
+    }
+    
     const mnemonic = process.env.TON_MNEMONIC.split(" ");
     const key = await mnemonicToWalletKey(mnemonic);
 
@@ -143,8 +158,18 @@ async function getWallet() {
 
     const contract = client.open(wallet);
     const address = contract.address.toString();
+    
+    // حفظ المتغيرات
+    walletContract = contract;
+    walletKey = key;
+    walletAddress = address;
+    
     console.log("✅ Wallet loaded:", address.substring(0, 10) + "...");
-    return { contract, key, wallet, address };
+    
+    // قراءة الرصيد بعد تحميل المحفظة
+    await checkWalletBalance(true); // true = تجاهل وقت التذكير عند بدء التشغيل
+    
+    return { contract, key, address };
   } catch (error) {
     console.error("❌ Wallet error:", error.message);
     throw error;
@@ -152,7 +177,99 @@ async function getWallet() {
 }
 
 // ==========================
-// 🔹 إرسال TON (معدل لحل المشكلة)
+// 🔹 قراءة رصيد المحفظة
+// ==========================
+
+async function getWalletBalance() {
+  try {
+    const { contract } = await getWallet();
+    const balance = await contract.getBalance();
+    
+    // تحويل من nano TON إلى TON
+    const balanceInTON = Number(balance) / 1e9;
+    
+    console.log(`💰 Wallet Balance: ${balanceInTON.toFixed(2)} TON`);
+    
+    return balanceInTON;
+  } catch (error) {
+    console.log(`❌ Error getting balance: ${error.message}`);
+    return 0;
+  }
+}
+
+// ==========================
+// 🔹 التحقق من الرصيد وإرسال تذكير
+// ==========================
+
+async function checkWalletBalance(ignoreTimeCheck = false) {
+  try {
+    const balance = await getWalletBalance();
+    const now = Date.now();
+    
+    // إذا كان الرصيد أقل من 1 TON
+    if (balance < 1) {
+      console.log(`⚠️ Low wallet balance: ${balance.toFixed(2)} TON (minimum required: 1 TON)`);
+      
+      // التحقق من وقت آخر تذكير
+      if (ignoreTimeCheck || (now - lastBalanceWarningTime) > BALANCE_WARNING_INTERVAL) {
+        await sendBalanceWarning(balance);
+        lastBalanceWarningTime = now;
+      }
+    }
+    
+    return balance;
+  } catch (error) {
+    console.log(`❌ Error in checkWalletBalance: ${error.message}`);
+    return 0;
+  }
+}
+
+// ==========================
+// 🔹 إرسال تحذير الرصيد المنخفض
+// ==========================
+
+async function sendBalanceWarning(currentBalance) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) return;
+  
+  const walletLink = `https://tonviewer.com/${walletAddress}`;
+  
+  const warningMessage = `⚠️ *Low Wallet Balance Warning* ⚠️
+
+💰 Current Balance: ${currentBalance.toFixed(2)} TON
+📉 Minimum Required: 1 TON
+
+🔗 [View Wallet](${walletLink})
+
+Please add funds to the wallet to continue processing withdrawals.`;
+
+  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+  const payload = {
+    chat_id: ADMIN_CHAT_ID,
+    text: warningMessage,
+    parse_mode: 'Markdown',
+    disable_web_page_preview: false
+  };
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    
+    if (response.ok) {
+      console.log(`✅ Balance warning sent to admin`);
+    } else {
+      console.log(`❌ Failed to send balance warning`);
+    }
+  } catch (error) {
+    console.log(`❌ Error sending balance warning: ${error.message}`);
+  }
+}
+
+// ==========================
+// 🔹 إرسال TON (معدل مع التحقق من الرصيد)
 // ==========================
 
 async function sendTON(toAddress, amount) {
@@ -165,12 +282,26 @@ async function sendTON(toAddress, amount) {
       throw new Error(`Invalid amount after rounding: ${roundedAmount}`);
     }
     
+    // قراءة رصيد المحفظة قبل الإرسال
+    const currentBalance = await getWalletBalance();
+    
+    // التحقق من كفاية الرصيد
+    if (currentBalance < roundedAmount) {
+      console.log(`❌ Insufficient balance: ${currentBalance.toFixed(2)} TON (required: ${roundedAmount} TON)`);
+      
+      // إرسال تحذير فوري عن الرصيد المنخفض
+      await sendBalanceWarning(currentBalance);
+      
+      throw new Error(`Insufficient balance. Available: ${currentBalance.toFixed(2)} TON, Required: ${roundedAmount} TON`);
+    }
+    
     const { contract, key } = await getWallet();
     const seqno = await contract.getSeqno();
     
     const senderAddress = contract.address.toString();
     
     console.log(`💰 Sending ${roundedAmount} TON to ${toAddress.substring(0,10)}...`);
+    console.log(`💰 Balance before send: ${currentBalance.toFixed(2)} TON`);
     
     if (roundedAmount < 0.2) {
       console.log(`⚠️ Small amount: ${roundedAmount} TON`);
@@ -193,6 +324,15 @@ async function sendTON(toAddress, amount) {
     });
 
     console.log(`✅ Transaction sent successfully`);
+    
+    // قراءة الرصيد بعد الإرسال للتحقق
+    setTimeout(async () => {
+      const newBalance = await getWalletBalance();
+      console.log(`💰 Balance after send: ${newBalance.toFixed(2)} TON`);
+      
+      // التحقق من الرصيد بعد الإرسال
+      await checkWalletBalance();
+    }, 5000);
     
     return {
       status: "sent",
@@ -248,17 +388,14 @@ Your funds have been delivered.`;
 }
 
 // ==========================
-// 🔹 إرسال إشعار للقناة - في الموضوع الصحيح
+// 🔹 إرسال إشعار للقناة
 // ==========================
 
 async function sendChannelNotification(amount, toAddress, userId) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) return;
   
-  // معرف المجموعة
   const chatId = "@Crystal_Ranch_chat";
-  
-  // معرف الموضوع الصحيح لـ "Withdrawals & deposit 💰"
   const topicId = 5;
   
   const walletLink = `https://tonviewer.com/${toAddress}`;
@@ -290,7 +427,6 @@ async function sendChannelNotification(amount, toAddress, userId) {
     if (data.ok && data.result) {
       const messageLink = `https://t.me/Crystal_Ranch_chat/${topicId}/${data.result.message_id}`;
       console.log(`✅ Channel notification sent to topic #${topicId}: ${messageLink}`);
-      console.log(`📬 Message posted in Withdrawals topic`);
     } else {
       console.log("❌ Failed to send channel notification:", data);
     }
@@ -321,7 +457,6 @@ function startWelcomeBot() {
 
 Early entry is the key to market control 🚀`;
 
-    // أمر /start
     welcomeBot.onText(/\/start/, async (msg) => {
       const chatId = msg.chat.id;
       
@@ -346,13 +481,49 @@ Early entry is the key to market control 🚀`;
       } catch (error) {}
     });
     
-    // أمر /help
+    // أمر /balance للمشرف فقط
+    welcomeBot.onText(/\/balance/, async (msg) => {
+      const chatId = msg.chat.id;
+      
+      // التحقق من أن المستخدم هو المشرف
+      if (chatId.toString() !== ADMIN_CHAT_ID) {
+        await welcomeBot.sendMessage(chatId, "⛔ Unauthorized");
+        return;
+      }
+      
+      try {
+        const balance = await getWalletBalance();
+        const walletLink = `https://tonviewer.com/${walletAddress}`;
+        
+        await welcomeBot.sendMessage(chatId, 
+          `💰 *Wallet Balance*\n\n` +
+          `Balance: ${balance.toFixed(2)} TON\n` +
+          `[View Wallet](${walletLink})`,
+          { parse_mode: 'Markdown', disable_web_page_preview: false }
+        );
+      } catch (error) {
+        await welcomeBot.sendMessage(chatId, `❌ Error: ${error.message}`);
+      }
+    });
+    
+    // أمر /checkbalance للتأكد يدوياً
+    welcomeBot.onText(/\/checkbalance/, async (msg) => {
+      const chatId = msg.chat.id;
+      
+      if (chatId.toString() !== ADMIN_CHAT_ID) {
+        await welcomeBot.sendMessage(chatId, "⛔ Unauthorized");
+        return;
+      }
+      
+      await checkWalletBalance(true);
+      await welcomeBot.sendMessage(chatId, "✅ Balance check completed");
+    });
+    
     welcomeBot.onText(/\/help/, async (msg) => {
       const chatId = msg.chat.id;
       await welcomeBot.sendMessage(chatId, "/start - Welcome\n/help - Help\n/about - About");
     });
     
-    // أمر /about
     welcomeBot.onText(/\/about/, async (msg) => {
       const chatId = msg.chat.id;
       await welcomeBot.sendMessage(chatId, "💎 Crystal Ranch\nApp: @Crystal_Ranch_bot\nChat: @Crystal_Ranch_chat");
@@ -394,12 +565,34 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     console.log(`🔄 Processing withdrawal: ${withdrawId}`);
     console.log("=".repeat(40));
 
-    // ✅ تقريب المبلغ قبل التحقق من الحد الأقصى
+    // ✅ التحقق من رصيد المحفظة أولاً
+    const currentBalance = await getWalletBalance();
+    
+    // ✅ تقريب المبلغ
     const roundedAmount = roundAmount(data.netAmount);
     
-    // ✅ حد أقصى 1 TON (بعد التقريب)
+    // ✅ التحقق من كفاية الرصيد قبل أي شيء
+    if (currentBalance < roundedAmount) {
+      console.log(`⏭️ Insufficient balance: ${currentBalance.toFixed(2)} TON (required: ${roundedAmount} TON)`);
+      
+      // إرسال تذكير بالمشرف
+      await sendBalanceWarning(currentBalance);
+      
+      // ترك السحب pending كما هو
+      console.log(`⏭️ Withdrawal ${withdrawId} remains pending - will process when balance is added`);
+      
+      isProcessing = false;
+      return;
+    }
+    
+    // ✅ حد أقصى 10 TON
     if (roundedAmount > 10) {
       console.log(`⏭️ Amount exceeds limit: ${roundedAmount} TON`);
+      await withdrawalsRef.child(withdrawId).update({
+        status: "failed",
+        updatedAt: Date.now(),
+        error: "Amount exceeds maximum limit of 10 TON"
+      });
       isProcessing = false;
       return;
     }
@@ -407,6 +600,11 @@ withdrawalsRef.on("child_added", async (snapshot) => {
     // ✅ تحقق من العنوان
     if (!data.address || (!data.address.startsWith("EQ") && !data.address.startsWith("UQ"))) {
       console.log(`⏭️ Invalid address: ${data.address}`);
+      await withdrawalsRef.child(withdrawId).update({
+        status: "failed",
+        updatedAt: Date.now(),
+        error: "Invalid TON address"
+      });
       isProcessing = false;
       return;
     }
@@ -429,6 +627,8 @@ withdrawalsRef.on("child_added", async (snapshot) => {
 
     // إرسال TON (بالمبلغ المقرب)
     console.log(`💰 Sending ${roundedAmount} TON to ${data.address.substring(0,10)}...`);
+    console.log(`💰 Current balance: ${currentBalance.toFixed(2)} TON`);
+    
     await sendTON(data.address, roundedAmount);
 
     // تحديث إلى paid
@@ -437,7 +637,9 @@ withdrawalsRef.on("child_added", async (snapshot) => {
       updatedAt: Date.now(),
       toAddress: data.address,
       originalAmount: data.netAmount,
-      sentAmount: roundedAmount // حفظ المبلغ الذي تم إرساله فعلياً
+      sentAmount: roundedAmount,
+      balanceBefore: currentBalance,
+      balanceAfter: await getWalletBalance() // سيتم تحديثه بعد الإرسال
     };
     
     await withdrawalsRef.child(withdrawId).update(updateData);
@@ -445,20 +647,19 @@ withdrawalsRef.on("child_added", async (snapshot) => {
 
     // إرسال الإشعارات
     if (userId) {
-      // إشعار المستخدم
       await sendUserNotification(userId, roundedAmount, data.address);
-      
-      // إشعار القناة في الموضوع الصحيح
       await sendChannelNotification(roundedAmount, data.address, userId);
     }
 
   } catch (error) {
     console.log(`❌ Error: ${error.message}`);
     if (snapshot.key) {
+      // في حالة الخطأ، نتركها pending عشان تجرب تاني
       await withdrawalsRef.child(snapshot.key).update({
-        status: "pending",
         updatedAt: Date.now(),
-        error: error.message
+        lastError: error.message,
+        errorCount: admin.database.ServerValue.increment(1)
+        // لا نغير status، نتركها pending
       });
     }
   } finally {
@@ -480,6 +681,15 @@ db.ref(".info/connected").on("value", (snap) => {
 });
 
 // ==========================
+// 🔹 التحقق الدوري من الرصيد
+// ==========================
+
+setInterval(async () => {
+  console.log("⏰ Running scheduled balance check...");
+  await checkWalletBalance();
+}, 15 * 60 * 1000); // كل 15 دقيقة
+
+// ==========================
 // 🔹 تشغيل كل شيء
 // ==========================
 
@@ -498,12 +708,21 @@ console.log(`TELEGRAM_BOT_TOKEN: ${process.env.TELEGRAM_BOT_TOKEN ? '✅' : '❌
 console.log("\n🤖 Starting Welcome Bot...");
 startWelcomeBot();
 
-// تحميل المحفظة
+// تحميل المحفظة والتحقق من الرصيد
 console.log("\n💰 Loading TON Wallet...");
-getWallet().catch(err => {
+getWallet().then(async () => {
+  const balance = await getWalletBalance();
+  console.log(`💰 Initial wallet balance: ${balance.toFixed(2)} TON`);
+  
+  if (balance < 1) {
+    console.log(`⚠️ WARNING: Low wallet balance! Please add funds.`);
+    await sendBalanceWarning(balance);
+  }
+}).catch(err => {
   console.error("❌ Wallet error:", err.message);
 });
 
-console.log("\n💸 TON Auto Withdraw Running (Max 1 TON)");
+console.log("\n💸 TON Auto Withdraw Running (Max 10 TON)");
 console.log("📬 Messages will be sent to topic #5 (Withdrawals & deposit 💰)");
+console.log("👤 Admin notifications will be sent to: 6970148965");
 console.log("=".repeat(50) + "\n");
