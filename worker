@@ -1,6 +1,7 @@
 // ============================================
 // FARM ECONOMY WORKER v5.1 - WITH RACE CONDITION FIX
 // FIXED: Atomic operations with Optimistic Locking to prevent double-spending
+// MODIFIED: Buy cow multiple times
 // ============================================
 
 export default {
@@ -890,7 +891,7 @@ async function atomicUpdateUserResource(env, userId, resource, deductAmount, exp
         }
         
         // التحقق من كفاية الرصيد
-        if (currentBalance < deductAmount) {
+        if (deductAmount > 0 && currentBalance < deductAmount) {
             return {
                 success: false,
                 error: `Insufficient ${resource}`,
@@ -1232,8 +1233,20 @@ async function updateReferralEarnings(env, referrerId, referredUserId, purchaseA
 // MACHINE PURCHASES
 // ============================================
 
+// ===== MODIFIED: Buy Cow Multiple Times =====
 async function handleBuyCow(env, userId, data) {
     try {
+        const { quantity = 1 } = data; // إضافة كمية الشراء
+        const buyQuantity = parseInt(quantity);
+        
+        if (buyQuantity <= 0) {
+            return {
+                success: false,
+                error: 'Invalid quantity',
+                errorCode: 'INVALID_QUANTITY'
+            };
+        }
+        
         const userResult = await dbGet(env, `users/${userId}`);
         const globalResult = await dbGet(env, 'global');
         
@@ -1266,23 +1279,21 @@ async function handleBuyCow(env, userId, data) {
             user = productionResult.user;
         }
         
-        if (global.cows_sold >= GAME_CONSTANTS.COW_GLOBAL_CAP) {
+        // التحقق من توفر العدد المطلوب عالمياً
+        const cowsRemaining = GAME_CONSTANTS.COW_GLOBAL_CAP - (global.cows_sold || 0);
+        if (cowsRemaining < buyQuantity) {
             return {
                 success: false,
-                error: 'All Cow machines are sold out',
-                errorCode: 'COW_SOLD_OUT'
+                error: `Only ${cowsRemaining} Cow machines left`,
+                errorCode: 'INSUFFICIENT_GLOBAL_SUPPLY'
             };
         }
         
-        if (user.cows_owned > 0) {
-            return {
-                success: false,
-                error: 'You can only own one Cow machine',
-                errorCode: 'COW_ALREADY_OWNED'
-            };
-        }
+        // حساب السعر الإجمالي
+        const totalPrice = GAME_CONSTANTS.COW_PRICE * buyQuantity;
         
-        if ((user.tonBalance || 0) < GAME_CONSTANTS.COW_PRICE) {
+        // التحقق من كفاية الرصيد
+        if ((user.tonBalance || 0) < totalPrice) {
             return {
                 success: false,
                 error: 'Insufficient TON balance',
@@ -1290,35 +1301,39 @@ async function handleBuyCow(env, userId, data) {
             };
         }
         
+        // تحديث بيانات المستخدم
         const userUpdates = {
-            cows_owned: 1,
-            tonBalance: (user.tonBalance || 0) - GAME_CONSTANTS.COW_PRICE,
+            cows_owned: (user.cows_owned || 0) + buyQuantity,
+            tonBalance: (user.tonBalance || 0) - totalPrice,
             updatedAt: Date.now()
         };
         
+        // تحديث البيانات العالمية
         const globalUpdates = {
-            cows_sold: (global.cows_sold || 0) + 1,
+            cows_sold: (global.cows_sold || 0) + buyQuantity,
             updatedAt: Date.now()
         };
         
         await dbUpdate(env, `users/${userId}`, userUpdates);
         await dbUpdate(env, 'global', globalUpdates);
         
+        // مكافأة الريفيرال (مرة واحدة فقط للمشتري)
         let referralCommission = 0;
-        
-        if (user.referredBy) {
+        if (user.referredBy && (user.cows_owned === 0)) { // فقط إذا كان أول شراء
             referralCommission = await updateReferralEarnings(
                 env, 
                 user.referredBy, 
                 userId, 
-                GAME_CONSTANTS.COW_PRICE, 
+                totalPrice, 
                 'cow_purchase'
             );
         }
         
+        // تسجيل المعاملة
         await dbPush(env, `users/${userId}/transactions`, {
             type: 'buy_cow',
-            amount: GAME_CONSTANTS.COW_PRICE,
+            quantity: buyQuantity,
+            amount: totalPrice,
             payment: 'TON',
             timestamp: Date.now()
         });
@@ -1331,7 +1346,8 @@ async function handleBuyCow(env, userId, data) {
         return {
             success: true,
             data: {
-                cows_owned: 1,
+                cows_owned: updatedUser.cows_owned,
+                quantity_bought: buyQuantity,
                 newTonBalance: updatedUser.tonBalance,
                 cows_sold: globalUpdates.cows_sold,
                 cows_remaining: GAME_CONSTANTS.COW_GLOBAL_CAP - globalUpdates.cows_sold,
