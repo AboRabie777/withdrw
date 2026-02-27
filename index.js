@@ -10,7 +10,6 @@ const TelegramBot = require('node-telegram-bot-api');
 
 process.stdin.resume();
 
-// تجاهل جميع إشارات الإنهاء
 process.on('SIGTERM', () => {
   console.log('⚠️ Received SIGTERM - IGNORING');
 });
@@ -19,7 +18,6 @@ process.on('SIGINT', () => {
   console.log('⚠️ Received SIGINT - IGNORING');
 });
 
-// Keep-alive كل 20 ثانية
 setInterval(() => {
   console.log('💓 BOT ALIVE - ' + new Date().toISOString());
   
@@ -50,9 +48,9 @@ setInterval(() => {
 // 🔹 إعدادات التذكير
 // ==========================
 
-const ADMIN_CHAT_ID = "6970148965"; // ايدي التليجرام الخاص بك
+const ADMIN_CHAT_ID = "6970148965";
 let lastBalanceWarningTime = 0;
-const BALANCE_WARNING_INTERVAL = 30 * 60 * 1000; // 30 دقيقة بين كل تذكير
+const BALANCE_WARNING_INTERVAL = 30 * 60 * 1000;
 
 // ==========================
 // 🔹 دالة تقريب المبلغ
@@ -81,9 +79,6 @@ function roundAmount(amount) {
       console.log(`⚠️ Amount too small: ${rounded} TON`);
       return 0.01;
     }
-    
-    console.log(`💰 Original amount: ${numAmount}`);
-    console.log(`💰 Rounded amount: ${rounded}`);
     
     return rounded;
   } catch (error) {
@@ -131,15 +126,17 @@ const client = new TonClient({
 });
 
 // ==========================
-// 🔹 متغيرات المحفظة العامة
+// 🔹 متغيرات المحفظة
 // ==========================
 
 let walletContract = null;
 let walletKey = null;
 let walletAddress = null;
+let isProcessing = false;
+const processingQueue = new Set(); // لتتبع السحوبات قيد المعالجة
 
 // ==========================
-// 🔹 إنشاء المحفظة W5
+// 🔹 إنشاء المحفظة
 // ==========================
 
 async function getWallet() {
@@ -159,15 +156,12 @@ async function getWallet() {
     const contract = client.open(wallet);
     const address = contract.address.toString();
     
-    // حفظ المتغيرات
     walletContract = contract;
     walletKey = key;
     walletAddress = address;
     
     console.log("✅ Wallet loaded:", address.substring(0, 10) + "...");
-    
-    // قراءة الرصيد بعد تحميل المحفظة
-    await checkWalletBalance(true); // true = تجاهل وقت التذكير عند بدء التشغيل
+    await checkWalletBalance(true);
     
     return { contract, key, address };
   } catch (error) {
@@ -184,12 +178,7 @@ async function getWalletBalance() {
   try {
     const { contract } = await getWallet();
     const balance = await contract.getBalance();
-    
-    // تحويل من nano TON إلى TON
     const balanceInTON = Number(balance) / 1e9;
-    
-    console.log(`💰 Wallet Balance: ${balanceInTON.toFixed(2)} TON`);
-    
     return balanceInTON;
   } catch (error) {
     console.log(`❌ Error getting balance: ${error.message}`);
@@ -206,11 +195,9 @@ async function checkWalletBalance(ignoreTimeCheck = false) {
     const balance = await getWalletBalance();
     const now = Date.now();
     
-    // إذا كان الرصيد أقل من 1 TON
     if (balance < 1) {
-      console.log(`⚠️ Low wallet balance: ${balance.toFixed(2)} TON (minimum required: 1 TON)`);
+      console.log(`⚠️ Low wallet balance: ${balance.toFixed(2)} TON`);
       
-      // التحقق من وقت آخر تذكير
       if (ignoreTimeCheck || (now - lastBalanceWarningTime) > BALANCE_WARNING_INTERVAL) {
         await sendBalanceWarning(balance);
         lastBalanceWarningTime = now;
@@ -225,7 +212,7 @@ async function checkWalletBalance(ignoreTimeCheck = false) {
 }
 
 // ==========================
-// 🔹 إرسال تحذير الرصيد المنخفض
+// 🔹 إرسال تحذير الرصيد
 // ==========================
 
 async function sendBalanceWarning(currentBalance) {
@@ -252,62 +239,41 @@ Please add funds to the wallet to continue processing withdrawals.`;
   };
 
   try {
-    const response = await fetch(url, {
+    await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    
-    if (response.ok) {
-      console.log(`✅ Balance warning sent to admin`);
-    } else {
-      console.log(`❌ Failed to send balance warning`);
-    }
+    console.log(`✅ Balance warning sent to admin`);
   } catch (error) {
     console.log(`❌ Error sending balance warning: ${error.message}`);
   }
 }
 
 // ==========================
-// 🔹 إرسال TON (معدل مع التحقق من الرصيد)
+// 🔹 إرسال TON
 // ==========================
 
 async function sendTON(toAddress, amount) {
   try {
-    // تقريب المبلغ أولاً
     const roundedAmount = roundAmount(amount);
     
-    // التحقق من صحة المبلغ بعد التقريب
     if (roundedAmount <= 0) {
       throw new Error(`Invalid amount after rounding: ${roundedAmount}`);
     }
     
-    // قراءة رصيد المحفظة قبل الإرسال
     const currentBalance = await getWalletBalance();
     
-    // التحقق من كفاية الرصيد
     if (currentBalance < roundedAmount) {
-      console.log(`❌ Insufficient balance: ${currentBalance.toFixed(2)} TON (required: ${roundedAmount} TON)`);
-      
-      // إرسال تحذير فوري عن الرصيد المنخفض
       await sendBalanceWarning(currentBalance);
-      
       throw new Error(`Insufficient balance. Available: ${currentBalance.toFixed(2)} TON, Required: ${roundedAmount} TON`);
     }
     
     const { contract, key } = await getWallet();
     const seqno = await contract.getSeqno();
     
-    const senderAddress = contract.address.toString();
-    
     console.log(`💰 Sending ${roundedAmount} TON to ${toAddress.substring(0,10)}...`);
-    console.log(`💰 Balance before send: ${currentBalance.toFixed(2)} TON`);
     
-    if (roundedAmount < 0.2) {
-      console.log(`⚠️ Small amount: ${roundedAmount} TON`);
-    }
-    
-    // تحويل المبلغ المقرب إلى nano TON
     const nanoAmount = toNano(roundedAmount.toFixed(2));
     
     await contract.sendTransfer({
@@ -325,19 +291,13 @@ async function sendTON(toAddress, amount) {
 
     console.log(`✅ Transaction sent successfully`);
     
-    // قراءة الرصيد بعد الإرسال للتحقق
     setTimeout(async () => {
-      const newBalance = await getWalletBalance();
-      console.log(`💰 Balance after send: ${newBalance.toFixed(2)} TON`);
-      
-      // التحقق من الرصيد بعد الإرسال
       await checkWalletBalance();
     }, 5000);
     
     return {
       status: "sent",
-      hash: null,
-      fromAddress: senderAddress,
+      fromAddress: contract.address.toString(),
       toAddress: toAddress,
       amount: roundedAmount
     };
@@ -371,17 +331,12 @@ Your funds have been delivered.`;
   };
 
   try {
-    const response = await fetch(url, {
+    await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    
-    if (response.ok) {
-      console.log(`✅ Notification sent to user ${chatId}`);
-      return true;
-    }
-    return false;
+    return true;
   } catch (error) {
     return false;
   }
@@ -425,13 +380,189 @@ async function sendChannelNotification(amount, toAddress, userId) {
     const data = await response.json();
     
     if (data.ok && data.result) {
-      const messageLink = `https://t.me/Crystal_Ranch_chat/${topicId}/${data.result.message_id}`;
-      console.log(`✅ Channel notification sent to topic #${topicId}: ${messageLink}`);
-    } else {
-      console.log("❌ Failed to send channel notification:", data);
+      console.log(`✅ Channel notification sent to topic #${topicId}`);
     }
   } catch (error) {
-    console.log("❌ Error sending channel notification:", error.message);
+    console.log(`❌ Error sending channel notification: ${error.message}`);
+  }
+}
+
+// ==========================
+// 🔹 معالجة سحب واحد
+// ==========================
+
+async function processWithdrawal(withdrawId, data) {
+  console.log("\n" + "=".repeat(40));
+  console.log(`🔄 Processing withdrawal: ${withdrawId}`);
+  console.log("=".repeat(40));
+
+  try {
+    // التحقق من الرصيد
+    const currentBalance = await getWalletBalance();
+    const roundedAmount = roundAmount(data.netAmount);
+    
+    // التحقق من كفاية الرصيد
+    if (currentBalance < roundedAmount) {
+      console.log(`⏭️ Insufficient balance: ${currentBalance.toFixed(2)} TON (required: ${roundedAmount} TON)`);
+      await sendBalanceWarning(currentBalance);
+      return false; // لم يتم المعالجة
+    }
+    
+    // التحقق من الحد الأقصى
+    if (roundedAmount > 10) {
+      console.log(`⏭️ Amount exceeds limit: ${roundedAmount} TON`);
+      await db.ref(`withdrawals/${withdrawId}`).update({
+        status: "failed",
+        updatedAt: Date.now(),
+        error: "Amount exceeds maximum limit of 10 TON"
+      });
+      return true; // تمت المعالجة (فشل)
+    }
+
+    // التحقق من العنوان
+    if (!data.address || (!data.address.startsWith("EQ") && !data.address.startsWith("UQ"))) {
+      console.log(`⏭️ Invalid address: ${data.address}`);
+      await db.ref(`withdrawals/${withdrawId}`).update({
+        status: "failed",
+        updatedAt: Date.now(),
+        error: "Invalid TON address"
+      });
+      return true; // تمت المعالجة (فشل)
+    }
+
+    // استخراج User ID
+    let userId = null;
+    if (withdrawId.startsWith("wd_")) {
+      const parts = withdrawId.split("_");
+      if (parts.length >= 3) {
+        userId = parts[2];
+      }
+    }
+
+    // تحديث إلى processing
+    await db.ref(`withdrawals/${withdrawId}`).update({
+      status: "processing",
+      updatedAt: Date.now(),
+    });
+
+    // إرسال TON
+    await sendTON(data.address, roundedAmount);
+
+    // تحديث إلى paid
+    await db.ref(`withdrawals/${withdrawId}`).update({
+      status: "paid",
+      updatedAt: Date.now(),
+      toAddress: data.address,
+      originalAmount: data.netAmount,
+      sentAmount: roundedAmount,
+      completedAt: Date.now()
+    });
+    
+    console.log(`✅ Withdrawal completed: ${withdrawId}`);
+
+    // إرسال الإشعارات
+    if (userId) {
+      await sendUserNotification(userId, roundedAmount, data.address);
+      await sendChannelNotification(roundedAmount, data.address, userId);
+    }
+    
+    return true; // تمت المعالجة بنجاح
+
+  } catch (error) {
+    console.log(`❌ Error processing ${withdrawId}: ${error.message}`);
+    
+    // في حالة الخطأ، نزيد count المحاولات
+    await db.ref(`withdrawals/${withdrawId}`).update({
+      updatedAt: Date.now(),
+      lastError: error.message,
+      errorCount: admin.database.ServerValue.increment(1)
+      // نتركها pending
+    });
+    
+    return false; // لم تنجح المعالجة
+  }
+}
+
+// ==========================
+// 🔹 البحث عن السحوبات المعلقة ومعالجتها
+// ==========================
+
+async function processPendingWithdrawals() {
+  // إذا كان فيه عملية قيد التنفيذ، نخرج
+  if (isProcessing) {
+    console.log("⚠️ Already processing, skipping check...");
+    return;
+  }
+  
+  try {
+    isProcessing = true;
+    
+    // جلب كل السحوبات المعلقة
+    const snapshot = await db.ref("withdrawals")
+      .orderByChild("status")
+      .equalTo("pending")
+      .once("value");
+    
+    const withdrawals = snapshot.val();
+    
+    if (!withdrawals) {
+      console.log("📭 No pending withdrawals found");
+      isProcessing = false;
+      return;
+    }
+    
+    // تحويل الكائن إلى مصفوفة وترتيبها حسب الوقت (الأقدم أولاً)
+    const withdrawalList = Object.entries(withdrawals)
+      .map(([id, data]) => ({
+        id,
+        data,
+        timestamp: data.createdAt || data.timestamp || 0
+      }))
+      .sort((a, b) => a.timestamp - b.timestamp); // الأقدم أولاً
+    
+    console.log(`📋 Found ${withdrawalList.length} pending withdrawals`);
+    
+    // معالجة كل سحب على حدة
+    for (const withdrawal of withdrawalList) {
+      const { id, data } = withdrawal;
+      
+      // نتأكد إن السحب لسه pending ومش في قائمة المعالجة
+      if (data.status !== "pending") continue;
+      if (processingQueue.has(id)) continue;
+      
+      // نضيف للسيت عشان منكررش المعالجة
+      processingQueue.add(id);
+      
+      try {
+        // نقرأ البيانات تاني عشان نتأكد إنها لسه pending
+        const currentSnapshot = await db.ref(`withdrawals/${id}`).once("value");
+        const currentData = currentSnapshot.val();
+        
+        if (currentData && currentData.status === "pending") {
+          console.log(`\n🔄 Processing withdrawal ${id} (${withdrawalList.indexOf(withdrawal) + 1}/${withdrawalList.length})`);
+          
+          // معالجة السحب
+          await processWithdrawal(id, currentData);
+          
+          // ننتظر 3 ثواني بين كل عملية
+          if (withdrawalList.length > 1) {
+            console.log(`⏱️ Waiting 3 seconds before next withdrawal...`);
+            await new Promise(resolve => setTimeout(resolve, 3000));
+          }
+        }
+      } catch (error) {
+        console.log(`❌ Error in withdrawal ${id}: ${error.message}`);
+      } finally {
+        // نشيل من السيت بعد المعالجة
+        processingQueue.delete(id);
+      }
+    }
+    
+  } catch (error) {
+    console.log(`❌ Error in processPendingWithdrawals: ${error.message}`);
+  } finally {
+    isProcessing = false;
+    console.log("✅ Finished processing pending withdrawals\n");
   }
 }
 
@@ -460,8 +591,6 @@ Early entry is the key to market control 🚀`;
     welcomeBot.onText(/\/start/, async (msg) => {
       const chatId = msg.chat.id;
       
-      console.log(`👋 New user started: ${chatId}`);
-      
       const keyboard = {
         inline_keyboard: [
           [{ text: "🚀 Open App", url: "https://t.me/Crystal_Ranch_bot?startapp=" }],
@@ -477,15 +606,13 @@ Early entry is the key to market control 🚀`;
           reply_markup: keyboard,
           disable_web_page_preview: true
         });
-        console.log(`✅ Welcome sent to ${chatId}`);
       } catch (error) {}
     });
     
-    // أمر /balance للمشرف فقط
+    // أمر /balance
     welcomeBot.onText(/\/balance/, async (msg) => {
       const chatId = msg.chat.id;
       
-      // التحقق من أن المستخدم هو المشرف
       if (chatId.toString() !== ADMIN_CHAT_ID) {
         await welcomeBot.sendMessage(chatId, "⛔ Unauthorized");
         return;
@@ -493,11 +620,18 @@ Early entry is the key to market control 🚀`;
       
       try {
         const balance = await getWalletBalance();
+        const pendingCount = await db.ref("withdrawals")
+          .orderByChild("status")
+          .equalTo("pending")
+          .once("value")
+          .then(snapshot => snapshot.numChildren());
+        
         const walletLink = `https://tonviewer.com/${walletAddress}`;
         
         await welcomeBot.sendMessage(chatId, 
-          `💰 *Wallet Balance*\n\n` +
+          `💰 *Wallet Status*\n\n` +
           `Balance: ${balance.toFixed(2)} TON\n` +
+          `Pending Withdrawals: ${pendingCount}\n` +
           `[View Wallet](${walletLink})`,
           { parse_mode: 'Markdown', disable_web_page_preview: false }
         );
@@ -506,8 +640,8 @@ Early entry is the key to market control 🚀`;
       }
     });
     
-    // أمر /checkbalance للتأكد يدوياً
-    welcomeBot.onText(/\/checkbalance/, async (msg) => {
+    // أمر /process للتشغيل اليدوي
+    welcomeBot.onText(/\/process/, async (msg) => {
       const chatId = msg.chat.id;
       
       if (chatId.toString() !== ADMIN_CHAT_ID) {
@@ -515,18 +649,9 @@ Early entry is the key to market control 🚀`;
         return;
       }
       
-      await checkWalletBalance(true);
-      await welcomeBot.sendMessage(chatId, "✅ Balance check completed");
-    });
-    
-    welcomeBot.onText(/\/help/, async (msg) => {
-      const chatId = msg.chat.id;
-      await welcomeBot.sendMessage(chatId, "/start - Welcome\n/help - Help\n/about - About");
-    });
-    
-    welcomeBot.onText(/\/about/, async (msg) => {
-      const chatId = msg.chat.id;
-      await welcomeBot.sendMessage(chatId, "💎 Crystal Ranch\nApp: @Crystal_Ranch_bot\nChat: @Crystal_Ranch_chat");
+      await welcomeBot.sendMessage(chatId, "🔄 Processing pending withdrawals...");
+      await processPendingWithdrawals();
+      await welcomeBot.sendMessage(chatId, "✅ Processing completed");
     });
     
     welcomeBot.on('polling_error', () => {});
@@ -536,158 +661,6 @@ Early entry is the key to market control 🚀`;
     console.log("❌ Failed to start welcome bot:", error.message);
   }
 }
-
-// ==========================
-// 🔹 مراقبة السحوبات
-// ==========================
-
-const withdrawalsRef = db.ref("withdrawals");
-let isProcessing = false;
-
-withdrawalsRef.on("child_added", async (snapshot) => {
-  if (isProcessing) {
-    console.log("⚠️ Already processing a withdrawal, skipping...");
-    return;
-  }
-  
-  isProcessing = true;
-  
-  try {
-    const withdrawId = snapshot.key;
-    const data = snapshot.val();
-
-    if (!data || data.status !== "pending") {
-      isProcessing = false;
-      return;
-    }
-
-    console.log("\n" + "=".repeat(40));
-    console.log(`🔄 Processing withdrawal: ${withdrawId}`);
-    console.log("=".repeat(40));
-
-    // ✅ التحقق من رصيد المحفظة أولاً
-    const currentBalance = await getWalletBalance();
-    
-    // ✅ تقريب المبلغ
-    const roundedAmount = roundAmount(data.netAmount);
-    
-    // ✅ التحقق من كفاية الرصيد قبل أي شيء
-    if (currentBalance < roundedAmount) {
-      console.log(`⏭️ Insufficient balance: ${currentBalance.toFixed(2)} TON (required: ${roundedAmount} TON)`);
-      
-      // إرسال تذكير بالمشرف
-      await sendBalanceWarning(currentBalance);
-      
-      // ترك السحب pending كما هو
-      console.log(`⏭️ Withdrawal ${withdrawId} remains pending - will process when balance is added`);
-      
-      isProcessing = false;
-      return;
-    }
-    
-    // ✅ حد أقصى 10 TON
-    if (roundedAmount > 10) {
-      console.log(`⏭️ Amount exceeds limit: ${roundedAmount} TON`);
-      await withdrawalsRef.child(withdrawId).update({
-        status: "failed",
-        updatedAt: Date.now(),
-        error: "Amount exceeds maximum limit of 10 TON"
-      });
-      isProcessing = false;
-      return;
-    }
-
-    // ✅ تحقق من العنوان
-    if (!data.address || (!data.address.startsWith("EQ") && !data.address.startsWith("UQ"))) {
-      console.log(`⏭️ Invalid address: ${data.address}`);
-      await withdrawalsRef.child(withdrawId).update({
-        status: "failed",
-        updatedAt: Date.now(),
-        error: "Invalid TON address"
-      });
-      isProcessing = false;
-      return;
-    }
-
-    // استخراج User ID
-    let userId = null;
-    if (withdrawId.startsWith("wd_")) {
-      const parts = withdrawId.split("_");
-      if (parts.length >= 3) {
-        userId = parts[2];
-        console.log(`✅ User ID: ${userId}`);
-      }
-    }
-
-    // تحديث إلى processing
-    await withdrawalsRef.child(withdrawId).update({
-      status: "processing",
-      updatedAt: Date.now(),
-    });
-
-    // إرسال TON (بالمبلغ المقرب)
-    console.log(`💰 Sending ${roundedAmount} TON to ${data.address.substring(0,10)}...`);
-    console.log(`💰 Current balance: ${currentBalance.toFixed(2)} TON`);
-    
-    await sendTON(data.address, roundedAmount);
-
-    // تحديث إلى paid
-    const updateData = {
-      status: "paid",
-      updatedAt: Date.now(),
-      toAddress: data.address,
-      originalAmount: data.netAmount,
-      sentAmount: roundedAmount,
-      balanceBefore: currentBalance,
-      balanceAfter: await getWalletBalance() // سيتم تحديثه بعد الإرسال
-    };
-    
-    await withdrawalsRef.child(withdrawId).update(updateData);
-    console.log(`✅ Withdrawal completed: ${withdrawId}`);
-
-    // إرسال الإشعارات
-    if (userId) {
-      await sendUserNotification(userId, roundedAmount, data.address);
-      await sendChannelNotification(roundedAmount, data.address, userId);
-    }
-
-  } catch (error) {
-    console.log(`❌ Error: ${error.message}`);
-    if (snapshot.key) {
-      // في حالة الخطأ، نتركها pending عشان تجرب تاني
-      await withdrawalsRef.child(snapshot.key).update({
-        updatedAt: Date.now(),
-        lastError: error.message,
-        errorCount: admin.database.ServerValue.increment(1)
-        // لا نغير status، نتركها pending
-      });
-    }
-  } finally {
-    setTimeout(() => {
-      isProcessing = false;
-      console.log("✅ Ready for next withdrawal\n");
-    }, 3000);
-  }
-});
-
-// ==========================
-// 🔹 التحقق من Firebase
-// ==========================
-
-db.ref(".info/connected").on("value", (snap) => {
-  if (snap.val() === true) {
-    console.log("📡 Firebase connected");
-  }
-});
-
-// ==========================
-// 🔹 التحقق الدوري من الرصيد
-// ==========================
-
-setInterval(async () => {
-  console.log("⏰ Running scheduled balance check...");
-  await checkWalletBalance();
-}, 15 * 60 * 1000); // كل 15 دقيقة
 
 // ==========================
 // 🔹 تشغيل كل شيء
@@ -708,18 +681,64 @@ console.log(`TELEGRAM_BOT_TOKEN: ${process.env.TELEGRAM_BOT_TOKEN ? '✅' : '❌
 console.log("\n🤖 Starting Welcome Bot...");
 startWelcomeBot();
 
-// تحميل المحفظة والتحقق من الرصيد
+// تحميل المحفظة
 console.log("\n💰 Loading TON Wallet...");
 getWallet().then(async () => {
   const balance = await getWalletBalance();
   console.log(`💰 Initial wallet balance: ${balance.toFixed(2)} TON`);
   
   if (balance < 1) {
-    console.log(`⚠️ WARNING: Low wallet balance! Please add funds.`);
+    console.log(`⚠️ WARNING: Low wallet balance!`);
     await sendBalanceWarning(balance);
   }
+  
+  // تشغيل المعالجة الأولية
+  console.log("\n🔄 Processing initial pending withdrawals...");
+  await processPendingWithdrawals();
+  
 }).catch(err => {
   console.error("❌ Wallet error:", err.message);
+});
+
+// ==========================
+// 🔹 تشغيل المعالجة الدورية
+// ==========================
+
+// معالجة كل 30 ثانية
+setInterval(async () => {
+  console.log("\n⏰ Running scheduled check for pending withdrawals...");
+  await processPendingWithdrawals();
+}, 30000); // 30 ثانية
+
+// التحقق الدوري من الرصيد كل 15 دقيقة
+setInterval(async () => {
+  console.log("⏰ Running scheduled balance check...");
+  await checkWalletBalance();
+}, 15 * 60 * 1000);
+
+// ==========================
+// 🔹 الاستماع للسحوبات الجديدة (كخطة احتياطية)
+// ==========================
+
+db.ref("withdrawals").on("child_added", async (snapshot) => {
+  const withdrawId = snapshot.key;
+  const data = snapshot.val();
+  
+  // نتأكد إن السحب pending ومش قيد المعالجة
+  if (data && data.status === "pending" && !processingQueue.has(withdrawId)) {
+    console.log(`📢 New pending withdrawal detected: ${withdrawId}`);
+    
+    // نشغل المعالجة على طول
+    setTimeout(() => {
+      processPendingWithdrawals();
+    }, 1000);
+  }
+});
+
+db.ref(".info/connected").on("value", (snap) => {
+  if (snap.val() === true) {
+    console.log("📡 Firebase connected");
+  }
 });
 
 console.log("\n💸 TON Auto Withdraw Running (Max 10 TON)");
