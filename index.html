@@ -838,7 +838,6 @@
             border-radius: 30px;
             padding: 8px 12px;
             color: var(--text-primary);
-            font-weight: 600;
             font-size: 12px;
             display: flex;
             align-items: center;
@@ -1866,7 +1865,7 @@
                     
                     <div class="action-buttons">
                         <button class="btn btn-primary pulse-pink" id="buyCowBtn">
-                            <i class="fas fa-shopping-cart"></i> <span data-i18n="farm.buy">Buy</span>
+                            <i class="fas fa-shopping-cart"></i> <span data-i18n="farm.buy">Buy Multiple</span>
                         </button>
                         <button class="btn btn-hatch" id="hatchCowBtn">
                             <i class="fas fa-egg"></i> <span data-i18n="farm.hatch">Hatch</span>
@@ -2752,7 +2751,7 @@
                 'farm.prod': 'Prod',
                 'farm.owned': 'Owned',
                 'farm.supply': 'Supply',
-                'farm.buy': 'Buy',
+                'farm.buy': 'Buy Multiple',
                 'farm.hatch': 'Hatch',
                 'farm.start': 'Start',
                 'farm.yield': 'Yield',
@@ -2910,7 +2909,7 @@
                 'farm.prod': 'Произв',
                 'farm.owned': 'Владею',
                 'farm.supply': 'Осталось',
-                'farm.buy': 'Купить',
+                'farm.buy': 'Купить несколько',
                 'farm.hatch': 'Вывести',
                 'farm.start': 'Запустить',
                 'farm.yield': 'Выход',
@@ -3342,6 +3341,138 @@
             }
         }
 
+        // ===== MODIFIED: Buy Cow Multiple Times Function =====
+        window.buyCow = async function() {
+            try {
+                // عرض مودال إدخال الكمية
+                const modal = document.createElement('div');
+                modal.className = 'modal-overlay active';
+                modal.id = 'buyCowModal';
+                modal.innerHTML = `
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h3 class="modal-title">
+                                <i class="fas fa-cow" style="color: var(--neon-green);"></i> ${App.currentLanguage === 'ru' ? 'شراء البقرة' : 'Buy Cow'}
+                            </h3>
+                            <i class="fas fa-times modal-close" onclick="document.getElementById('buyCowModal').remove()"></i>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label class="form-label">${App.currentLanguage === 'ru' ? 'الكمية' : 'Quantity'}</label>
+                            <input type="number" id="buyCowQuantity" class="form-input" value="1" min="1" max="${App.global?.cows_remaining || 1000}" oninput="updateCowTotal()">
+                            
+                            <div class="preset-buttons" style="margin-top: 10px;">
+                                <span class="preset-btn" data-cow-qty="1">1</span>
+                                <span class="preset-btn" data-cow-qty="5">5</span>
+                                <span class="preset-btn" data-cow-qty="10">10</span>
+                                <span class="preset-btn" data-cow-qty="25">25</span>
+                                <span class="preset-btn" data-cow-qty="50">50</span>
+                                <span class="preset-btn" data-cow-qty="100">100</span>
+                            </div>
+                        </div>
+                        
+                        <div class="total-ton-result" id="cowTotalPrice">
+                            ${App.currentLanguage === 'ru' ? 'الإجمالي' : 'Total'}: 1 TON
+                        </div>
+                        
+                        <div style="background: rgba(0,0,0,0.2); border-radius: 14px; padding: 12px; margin-bottom: 16px;">
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                                <span style="font-size: 11px; color: var(--text-secondary);">${App.currentLanguage === 'ru' ? 'الرصيد المتوفر' : 'Your Balance'}</span>
+                                <span style="font-weight: 700; color: var(--crystal-blue);" id="cowUserBalance">${formatTON(App.user?.tonBalance || 0)} TON</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="font-size: 11px; color: var(--text-secondary);">${App.currentLanguage === 'ru' ? 'الكمية المتوفرة عالمياً' : 'Global Available'}</span>
+                                <span style="font-weight: 700; color: var(--neon-green);">${App.global?.cows_remaining || 1000}</span>
+                            </div>
+                        </div>
+                        
+                        <div style="display: flex; gap: 10px;">
+                            <button class="btn btn-secondary" onclick="document.getElementById('buyCowModal').remove()" style="flex: 1;">
+                                ${App.currentLanguage === 'ru' ? 'إلغاء' : 'Cancel'}
+                            </button>
+                            <button class="btn btn-primary" id="confirmBuyCowBtn" onclick="executeBuyCow()" style="flex: 1;">
+                                <i class="fas fa-shopping-cart"></i> ${App.currentLanguage === 'ru' ? 'شراء' : 'Buy'}
+                            </button>
+                        </div>
+                    </div>
+                `;
+                
+                document.body.appendChild(modal);
+                
+                // إضافة مستمعي الأحداث للأزرار المحددة مسبقاً
+                modal.querySelectorAll('[data-cow-qty]').forEach(btn => {
+                    btn.addEventListener('click', function() {
+                        const qty = parseInt(this.dataset.cowQty);
+                        document.getElementById('buyCowQuantity').value = qty;
+                        updateCowTotal();
+                    });
+                });
+                
+                // إضافة مستمع لتحديث الإجمالي عند تغيير الكمية
+                const input = document.getElementById('buyCowQuantity');
+                input.addEventListener('input', updateCowTotal);
+                
+            } catch (error) {
+                console.error('Buy cow modal error:', error);
+            }
+        };
+
+        // دالة تحديث إجمالي سعر البقرة
+        function updateCowTotal() {
+            const quantity = parseInt(document.getElementById('buyCowQuantity').value) || 1;
+            const total = quantity * 1; // سعر البقرة 1 TON
+            document.getElementById('cowTotalPrice').innerHTML = `${App.currentLanguage === 'ru' ? 'الإجمالي' : 'Total'}: ${formatTON(total)} TON`;
+            
+            // التحقق من كفاية الرصيد والكمية المتوفرة
+            const totalPrice = total;
+            const userBalance = App.user?.tonBalance || 0;
+            const availableCows = App.global?.cows_remaining || 1000;
+            
+            const confirmBtn = document.getElementById('confirmBuyCowBtn');
+            if (totalPrice > userBalance) {
+                confirmBtn.disabled = true;
+                confirmBtn.style.opacity = '0.5';
+                document.getElementById('cowTotalPrice').style.color = 'var(--danger-red)';
+            } else if (quantity > availableCows) {
+                confirmBtn.disabled = true;
+                confirmBtn.style.opacity = '0.5';
+                document.getElementById('cowTotalPrice').style.color = 'var(--danger-red)';
+            } else {
+                confirmBtn.disabled = false;
+                confirmBtn.style.opacity = '1';
+                document.getElementById('cowTotalPrice').style.color = 'var(--crystal-blue)';
+            }
+        }
+
+        // دالة تنفيذ شراء البقرات المتعددة
+        window.executeBuyCow = async function() {
+            const quantity = parseInt(document.getElementById('buyCowQuantity').value) || 1;
+            
+            if (quantity <= 0) {
+                alert(App.currentLanguage === 'ru' ? 'الرجاء إدخال كمية صحيحة' : 'Please enter valid quantity');
+                return;
+            }
+            
+            try {
+                const result = await callAPI('buyCow', { quantity });
+                
+                await loadGameState();
+                animateTonBalance();
+                
+                showNotification(
+                    App.currentLanguage === 'ru' ? 
+                    `✅ تم شراء ${result.quantity_bought} بقرة مقابل ${result.quantity_bought} TON` : 
+                    `✅ Bought ${result.quantity_bought} Cow(s) for ${result.quantity_bought} TON`,
+                    'success'
+                );
+                
+                document.getElementById('buyCowModal').remove();
+                
+            } catch (error) {
+                console.error('Buy cow error:', error);
+            }
+        };
+
         async function loadGameState() {
             try {
                 const state = await callAPI('getState');
@@ -3398,7 +3529,6 @@
             }
         }
 
-        // Modified updateTasksUI function - Fixed messages
         function updateTasksUI() {
             if (!App.tasks) return;
             
@@ -3420,10 +3550,8 @@
                     (App.currentLanguage === 'ru' ? 'Канал' : 'Channel') : 
                     (App.currentLanguage === 'ru' ? 'Бот' : 'Bot');
                 
-                // For partner tasks, use special styling
                 const taskClass = task.id.startsWith('partner_') ? 'partner-task' : '';
                 
-                // Store task status in session for button toggle
                 const hasJoined = sessionStorage.getItem(`task_${task.id}_joined`) === 'true';
                 
                 html += `<div class="task-card ${taskClass}" style="padding: 10px;">
@@ -3456,14 +3584,11 @@
             tasksGrid.innerHTML = html;
         }
 
-        // Handle task button click - Fixed messages
         window.handleTaskButton = function(taskId, link, taskType, hasJoined) {
             if (!hasJoined) {
-                // Store that user is going to join
                 sessionStorage.setItem(`task_${taskId}_joined`, 'true');
                 window.open(link, '_blank');
                 
-                // Update button after 2 seconds (assuming they joined)
                 setTimeout(() => {
                     const btn = document.getElementById(`taskBtn_${taskId}`);
                     if (btn) {
@@ -3477,13 +3602,6 @@
             }
         };
 
-        window.openTask = function(taskId, link) {
-            // Store task ID in session for verification
-            sessionStorage.setItem('pendingTaskId', taskId);
-            window.open(link, '_blank');
-        };
-
-        // Modified verifyTask function - Fixed message display
         window.verifyTask = async function(taskId, taskType) {
             try {
                 const task = App.tasks[App.currentTaskTab].find(t => t.id === taskId);
@@ -3493,7 +3611,6 @@
                     return;
                 }
                 
-                // Show verification modal
                 const modal = document.getElementById('taskVerifyModal');
                 document.getElementById('verifyEmoji').innerHTML = task.type === 'channel' ? '📢' : '🤖';
                 document.getElementById('verifyTitle').innerHTML = task.type === 'channel' ? 
@@ -3503,12 +3620,10 @@
                 document.getElementById('verifyReward').innerHTML = formatTON(task.reward || CONFIG.TASK_REWARD) + ' TON';
                 document.getElementById('verifyJoinLink').href = task.link;
                 
-                // Clear previous status
                 const statusDiv = document.getElementById('verifyStatus');
                 statusDiv.style.display = 'none';
                 statusDiv.innerHTML = '';
                 
-                // Set verification handler
                 document.getElementById('verifyCheckBtn').onclick = async function() {
                     await performTaskVerification(task);
                 };
@@ -3521,7 +3636,6 @@
             }
         };
 
-        // Modified performTaskVerification function - Fixed message display
         async function performTaskVerification(task) {
             try {
                 const statusDiv = document.getElementById('verifyStatus');
@@ -3546,10 +3660,8 @@
                         'success'
                     );
                     
-                    // Clear joined status
                     sessionStorage.removeItem(`task_${task.id}_joined`);
                     
-                    // Close modal after 2 seconds and reload state
                     setTimeout(() => {
                         window.closeAllModals();
                         loadGameState();
@@ -3562,12 +3674,13 @@
                 const statusDiv = document.getElementById('verifyStatus');
                 statusDiv.style.display = 'block';
                 
-                // Check error message to display appropriate response
                 let errorMessage = error.message || '';
                 
                 if (errorMessage.includes('Not a member') || errorMessage.includes('NOT_MEMBER')) {
                     statusDiv.innerHTML = '<div style="color: var(--danger-red); text-align: center;">❌ ' + 
                         (App.currentLanguage === 'ru' ? 'Not a member of the channel' : 'Not a member of the channel') + '</div>';
+                    
+                    sessionStorage.removeItem(`task_${task.id}_joined`);
                 } else if (errorMessage.includes('already completed') || errorMessage.includes('TASK_ALREADY_COMPLETED')) {
                     statusDiv.innerHTML = '<div style="color: var(--warning); text-align: center;">⚠️ ' + 
                         (App.currentLanguage === 'ru' ? 'Task already completed' : 'Task already completed') + '</div>';
@@ -3575,23 +3688,17 @@
                     statusDiv.innerHTML = '<div style="color: var(--danger-red); text-align: center;">❌ ' + 
                         (errorMessage || (App.currentLanguage === 'ru' ? 'خطأ في التحقق' : 'Verification error')) + '</div>';
                 }
-                
-                // Clear joined status if not member
-                if (errorMessage.includes('Not a member') || errorMessage.includes('NOT_MEMBER')) {
-                    sessionStorage.removeItem(`task_${task.id}_joined`);
-                }
             }
         }
 
         function calculateTaskPrice() {
             const target = parseInt(document.getElementById('taskTarget').value) || 100;
             const reward = CONFIG.TASK_REWARD;
-            const totalCost = target * reward * 2; // Double price
+            const totalCost = target * reward * 2;
             
             document.getElementById('taskTotalCost').innerHTML = 
                 `Total Cost: ${formatTON(totalCost)} TON`;
             
-            // Check if user has enough balance
             const userBalance = App.user?.tonBalance || 0;
             const submitBtn = document.getElementById('submitTaskBtn');
             
@@ -3618,7 +3725,7 @@
                 return;
             }
             
-            const totalCost = target * CONFIG.TASK_REWARD * 2; // Double price
+            const totalCost = target * CONFIG.TASK_REWARD * 2;
             
             if (totalCost > (App.user?.tonBalance || 0)) {
                 alert(App.currentLanguage === 'ru' ? 
@@ -3651,7 +3758,6 @@
             }
         }
 
-        // Bounty Functions
         window.submitBounty = async function() {
             const link = document.getElementById('bountyPostLink').value.trim();
             const platform = document.getElementById('bountyPlatform').value;
@@ -3896,23 +4002,20 @@
             document.getElementById('cowProgressText').innerHTML = `${App.global.cows_sold || 0}/${App.global.cows_cap}`;
             document.getElementById('cowProgressFill').style.width = `${cowProgress}%`;
             
+            // تعديل زر البقرة للسماح بالشراء المتعدد
             const cowBtn = document.getElementById('buyCowBtn');
             const cowBadge = document.getElementById('cowBadge');
-            
-            if (App.user.cows_owned > 0) {
-                cowBtn.disabled = true;
-                cowBtn.innerHTML = '<i class="fas fa-check"></i> ' + (App.currentLanguage === 'ru' ? 'Владею' : 'Owned');
-                cowBadge.innerHTML = App.currentLanguage === 'ru' ? 'ВЛАДЕЮ' : 'OWNED';
-                cowBadge.className = 'machine-badge badge-owned';
-            } else if (App.global.cows_remaining <= 0) {
+
+            if (App.global.cows_remaining <= 0) {
                 cowBtn.disabled = true;
                 cowBtn.innerHTML = '<i class="fas fa-ban"></i> ' + (App.currentLanguage === 'ru' ? 'Продано' : 'Sold Out');
                 cowBadge.innerHTML = App.currentLanguage === 'ru' ? 'ПРОДАНО' : 'SOLD OUT';
                 cowBadge.className = 'machine-badge badge-soldout';
             } else {
-                cowBtn.disabled = App.user.tonBalance < 1;
-                cowBtn.innerHTML = '<i class="fas fa-shopping-cart"></i> ' + (App.currentLanguage === 'ru' ? 'Купить' : 'Buy');
-                cowBadge.innerHTML = `${App.global.cows_remaining} ` + (App.currentLanguage === 'ru' ? 'ОСТАЛОСЬ' : 'LEFT');
+                // السماح بالشراء المتعدد دائماً
+                cowBtn.disabled = false;
+                cowBtn.innerHTML = '<i class="fas fa-shopping-cart"></i> ' + (App.currentLanguage === 'ru' ? 'شراء متعدد' : 'Buy Multiple');
+                cowBadge.innerHTML = `${App.global.cows_remaining} ` + (App.currentLanguage === 'ru' ? 'متبقي' : 'LEFT');
                 cowBadge.className = 'machine-badge badge-available';
             }
             
@@ -4036,7 +4139,6 @@
             document.getElementById('withdrawFee').innerHTML = `${formatTON(fee)} TON`;
             document.getElementById('withdrawNet').innerHTML = `${formatTON(net)} TON`;
             
-            // Update task modal balance
             document.getElementById('taskUserBalance').innerHTML = formatTON(App.user.tonBalance || 0);
             
             updateMarketUI();
@@ -4288,20 +4390,6 @@
                 console.error('Load my orders error:', error);
             }
         }
-
-        window.buyCow = async function() {
-            try {
-                await callAPI('buyCow');
-                await loadGameState();
-                animateTonBalance();
-                showNotification(
-                    App.currentLanguage === 'ru' ? '✅ Корова куплена!' : '✅ Cow machine purchased!',
-                    'success'
-                );
-            } catch (error) {
-                console.error('Buy cow error:', error);
-            }
-        };
 
         window.buyChicken = async function() {
             try {
@@ -4776,12 +4864,10 @@
                     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
                     item.classList.add('active');
                     
-                    // Load tasks when tasks section is opened
                     if (sectionId === 'sectionTasks') {
                         updateTasksUI();
                     }
                     
-                    // Load bounties when bounty section is opened
                     if (sectionId === 'sectionBounty') {
                         loadBounties();
                     }
@@ -4910,12 +4996,10 @@
                 });
             });
             
-            // Bounty button
             document.getElementById('bountyButton').addEventListener('click', function() {
                 document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
                 document.getElementById('sectionBounty').classList.add('active');
                 document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-                // Don't activate any nav item since bounty is removed from nav
                 loadBounties();
             });
             
