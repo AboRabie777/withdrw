@@ -1,8 +1,69 @@
 // ============================================
-// FARM ECONOMY WORKER v5.2 - COMPLETE RACE CONDITION FIX
-// FIXED: All sensitive operations now use atomicUpdateUserResource
-// FIXED: Withdraw, BuyCow, BuyChicken, BuyDiamondEngine, CancelOrder
+// FARM ECONOMY WORKER v5.4 - UNIVERSAL REQUEST LOCKING
+// FIXED: All requests now use withUserLock middleware
+// FIXED: All error messages are in English
 // ============================================
+
+// ============================================
+// PER-USER REQUEST LOCKING - UNIVERSAL PROTECTION
+// ============================================
+
+// كائن لتخزين الأقفال في الذاكرة (in-memory)
+const userLocks = new Map();
+
+/**
+ * دالة لمحاولة الحصول على قفل للمستخدم.
+ * تعيد `true` إذا تم الحصول على القفل بنجاح، و `false` إذا كان المستخدم مقفلاً بالفعل.
+ */
+function acquireUserLock(userId) {
+    if (userLocks.has(userId)) {
+        console.log(`[LOCK] User ${userId} is already locked. Request rejected.`);
+        return false;
+    }
+    userLocks.set(userId, true);
+    console.log(`[LOCK] Lock acquired for user ${userId}.`);
+    return true;
+}
+
+/**
+ * دالة لتحرير قفل المستخدم.
+ */
+function releaseUserLock(userId) {
+    if (userLocks.delete(userId)) {
+        console.log(`[LOCK] Lock released for user ${userId}.`);
+    } else {
+        console.log(`[LOCK] Attempted to release non-existent lock for user ${userId}.`);
+    }
+}
+
+/**
+ * دالة مساعدة (Middleware) لتنفيذ أي دالة مع قفل المستخدم.
+ * تنطبق على جميع الطلبات - حساسة وغير حساسة
+ */
+async function withUserLock(userId, handlerFunction) {
+    if (!acquireUserLock(userId)) {
+        return {
+            success: false,
+            error: 'You have a request already in progress. Please wait a moment and try again.',
+            errorCode: 'USER_BUSY'
+        };
+    }
+
+    try {
+        const result = await handlerFunction();
+        return result;
+    } catch (error) {
+        console.error(`[LOCK] Error during handler execution for user ${userId}:`, error);
+        return {
+            success: false,
+            error: 'Internal server error during request processing',
+            errorCode: 'LOCKED_OPERATION_ERROR',
+            message: error.message
+        };
+    } finally {
+        releaseUserLock(userId);
+    }
+}
 
 export default {
     async fetch(request, env, ctx) {
@@ -53,11 +114,9 @@ export default {
         // ===== MAIN API ENDPOINT =====
         if (path === '/api') {
             try {
-                // === SECURITY ENHANCEMENTS ===
                 const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
                 const rateLimitKey = `ratelimit:${clientIp}`;
                 
-                // إضافة Idempotency-Key لمنع التكرار
                 const idempotencyKey = request.headers.get('X-Idempotency-Key');
                 if (idempotencyKey) {
                     const existingResult = await checkIdempotency(env, idempotencyKey);
@@ -203,120 +262,95 @@ export default {
                 
                 console.log(`[${new Date().toISOString()}] Action: ${action}, User: ${userId}`);
                 
-                let result;
+                // ===== UNIVERSAL LOCKING - ALL REQUESTS GO THROUGH withUserLock =====
+                // جميع الطلبات تمر عبر نظام القفل - سواء حساسة أو غير حساسة
+                let result = await withUserLock(userId, async () => {
+                    switch (action) {
+                        // Machine Purchases
+                        case 'buyCow':
+                            return await handleBuyCow(env, userId, data);
+                        case 'buyChicken':
+                            return await handleBuyChicken(env, userId, data);
+                        case 'buyDiamondEngine':
+                            return await handleBuyDiamondEngine(env, userId, data);
+                        
+                        // Hatch System
+                        case 'hatchCow':
+                            return await handleHatchCow(env, userId, data);
+                        case 'hatchChicken':
+                            return await handleHatchChicken(env, userId, data);
+                        
+                        // Diamond System
+                        case 'startDiamondProduction':
+                            return await handleStartDiamondProduction(env, userId, data);
+                        case 'convertDiamond':
+                            return await handleConvertDiamond(env, userId, data);
+                        
+                        // Market System
+                        case 'createSellOrder':
+                            return await handleCreateSellOrder(env, userId, data);
+                        case 'createBuyOrder':
+                            return await handleCreateBuyOrder(env, userId, data);
+                        case 'executeOrder':
+                            return await handleExecuteOrder(env, userId, data);
+                        case 'getMarketOrders':
+                            return await handleGetMarketOrders(env, data);
+                        case 'getMyOrders':
+                            return await handleGetMyOrders(env, userId);
+                        case 'cancelOrder':
+                            return await handleCancelOrder(env, userId, data);
+                        
+                        // Deposit/Withdraw
+                        case 'deposit':
+                            return await handleDeposit(env, userId, data);
+                        case 'verifyDeposit':
+                            return await handleVerifyDeposit(env, userId, data);
+                        case 'withdraw':
+                            return await handleWithdraw(env, userId, data);
+                        
+                        // Referral System
+                        case 'claimReferralEarnings':
+                            return await handleClaimReferralEarnings(env, userId);
+                        case 'getReferralInfo':
+                            return await handleGetReferralInfo(env, userId);
+                        
+                        // User Management
+                        case 'initializeUser':
+                            return await handleInitializeUser(env, userId, data);
+                        case 'setLanguage':
+                            return await handleSetLanguage(env, userId, data);
+                        case 'getState':
+                            return await handleGetState(env, userId);
+                        
+                        // Task System
+                        case 'createTask':
+                            return await handleCreateTask(env, userId, data);
+                        case 'verifyTask':
+                            return await handleVerifyTask(env, userId, data);
+                        case 'getTasks':
+                            return await handleGetTasks(env, userId);
+                        
+                        // Bounty System
+                        case 'submitBounty':
+                            return await handleSubmitBounty(env, userId, data);
+                        case 'getUserBounties':
+                            return await handleGetUserBounties(env, userId);
+                        case 'adminGetAllBounties':
+                            return await handleAdminGetAllBounties(env, userId);
+                        case 'adminApproveBounty':
+                            return await handleAdminApproveBounty(env, userId, data);
+                        case 'adminRejectBounty':
+                            return await handleAdminRejectBounty(env, userId, data);
+                        
+                        default:
+                            return {
+                                success: false,
+                                error: 'Unknown action',
+                                errorCode: 'UNKNOWN_ACTION'
+                            };
+                    }
+                });
                 
-                switch (action) {
-                    case 'getState':
-                        result = await handleGetState(env, userId);
-                        break;
-                    
-                    case 'buyCow':
-                        result = await handleBuyCow(env, userId, data);
-                        break;
-                    case 'buyChicken':
-                        result = await handleBuyChicken(env, userId, data);
-                        break;
-                    case 'buyDiamondEngine':
-                        result = await handleBuyDiamondEngine(env, userId, data);
-                        break;
-                    
-                    case 'hatchCow':
-                        result = await handleHatchCow(env, userId, data);
-                        break;
-                    case 'hatchChicken':
-                        result = await handleHatchChicken(env, userId, data);
-                        break;
-                    
-                    case 'startDiamondProduction':
-                        result = await handleStartDiamondProduction(env, userId, data);
-                        break;
-                    
-                    case 'convertDiamond':
-                        result = await handleConvertDiamond(env, userId, data);
-                        break;
-                    
-                    case 'createSellOrder':
-                        result = await handleCreateSellOrder(env, userId, data);
-                        break;
-                    case 'createBuyOrder':
-                        result = await handleCreateBuyOrder(env, userId, data);
-                        break;
-                    case 'executeOrder':
-                        result = await handleExecuteOrder(env, userId, data);
-                        break;
-                    case 'getMarketOrders':
-                        result = await handleGetMarketOrders(env, data);
-                        break;
-                    case 'getMyOrders':
-                        result = await handleGetMyOrders(env, userId);
-                        break;
-                    case 'cancelOrder':
-                        result = await handleCancelOrder(env, userId, data);
-                        break;
-                    
-                    case 'deposit':
-                        result = await handleDeposit(env, userId, data);
-                        break;
-                    case 'verifyDeposit':
-                        result = await handleVerifyDeposit(env, userId, data);
-                        break;
-                    
-                    case 'withdraw':
-                        result = await handleWithdraw(env, userId, data);
-                        break;
-                    
-                    case 'claimReferralEarnings':
-                        result = await handleClaimReferralEarnings(env, userId);
-                        break;
-                    case 'getReferralInfo':
-                        result = await handleGetReferralInfo(env, userId);
-                        break;
-                    
-                    case 'initializeUser':
-                        result = await handleInitializeUser(env, userId, data);
-                        break;
-                    
-                    case 'setLanguage':
-                        result = await handleSetLanguage(env, userId, data);
-                        break;
-                    
-                    // Task Actions
-                    case 'createTask':
-                        result = await handleCreateTask(env, userId, data);
-                        break;
-                    case 'verifyTask':
-                        result = await handleVerifyTask(env, userId, data);
-                        break;
-                    case 'getTasks':
-                        result = await handleGetTasks(env, userId);
-                        break;
-                    
-                    // Bounty Actions
-                    case 'submitBounty':
-                        result = await handleSubmitBounty(env, userId, data);
-                        break;
-                    case 'getUserBounties':
-                        result = await handleGetUserBounties(env, userId);
-                        break;
-                    case 'adminGetAllBounties':
-                        result = await handleAdminGetAllBounties(env, userId);
-                        break;
-                    case 'adminApproveBounty':
-                        result = await handleAdminApproveBounty(env, userId, data);
-                        break;
-                    case 'adminRejectBounty':
-                        result = await handleAdminRejectBounty(env, userId, data);
-                        break;
-                    
-                    default:
-                        result = {
-                            success: false,
-                            error: 'Unknown action',
-                            errorCode: 'UNKNOWN_ACTION'
-                        };
-                }
-                
-                // حفظ نتيجة idempotency
                 if (idempotencyKey && result.success) {
                     await saveIdempotencyResult(env, idempotencyKey, result);
                 }
@@ -357,7 +391,7 @@ export default {
 };
 
 // ============================================
-// IDEMPOTENCY FUNCTIONS - NEW
+// IDEMPOTENCY FUNCTIONS
 // ============================================
 
 async function checkIdempotency(env, key) {
@@ -380,7 +414,6 @@ async function saveIdempotencyResult(env, key, result) {
             timestamp: Date.now()
         });
         
-        // حذف المفاتيح القديمة بعد 24 ساعة
         setTimeout(async () => {
             await dbDelete(env, `idempotency/${key}`);
         }, 24 * 60 * 60 * 1000);
@@ -395,8 +428,7 @@ async function saveIdempotencyResult(env, key, result) {
 // ============================================
 
 async function checkRateLimit(env, key) {
-    // تنفيذ rate limit بسيط
-    return 0; // مؤقتاً
+    return 0;
 }
 
 function isValidCsrfToken(token, env) {
@@ -420,7 +452,7 @@ function sanitizeInput(input) {
 }
 
 // ============================================
-// GAME CONSTANTS - MODIFIED
+// GAME CONSTANTS
 // ============================================
 
 const GAME_CONSTANTS = {
@@ -453,22 +485,18 @@ const GAME_CONSTANTS = {
     
     HOUR_IN_MS: 3600000,
     
-    // Task System Constants
     TASK_REWARD: 0.001,
     MIN_TASK_TARGET: 100,
     MAX_TASK_DURATION_DAYS: 30,
     
-    // Bounty System Constants
     BOUNTY_MIN_REWARD: 1,
     BOUNTY_MAX_REWARD: 50,
     BOUNTY_MIN_FOLLOWERS: 500,
     
-    // Atomic Operation Constants
     MAX_RETRY_ATTEMPTS: 3,
     RETRY_DELAY_MS: 100
 };
 
-// Partner Tasks
 const PARTNER_TASKS = [
     {
         id: 'partner_news_channel',
@@ -498,7 +526,6 @@ const PARTNER_TASKS = [
     }
 ];
 
-// Admin IDs
 const ADMIN_IDS = ['123456789', '987654321'];
 
 // ============================================
@@ -850,7 +877,7 @@ async function dbDelete(env, path) {
 }
 
 // ============================================
-// ATOMIC UPDATE FUNCTION - ENHANCED
+// ATOMIC UPDATE FUNCTION
 // ============================================
 
 async function atomicUpdateUserResource(env, userId, resource, deductAmount, expectedBalance) {
@@ -859,7 +886,6 @@ async function atomicUpdateUserResource(env, userId, resource, deductAmount, exp
     
     while (attempt < maxAttempts) {
         try {
-            // نستخدم Firebase REST API مع query parameter للتحقق من القيمة القديمة
             const baseUrl = env.FIREBASE_DATABASE_URL?.replace(/\/$/, '');
             const apiKey = env.FIREBASE_API_KEY;
             
@@ -867,11 +893,9 @@ async function atomicUpdateUserResource(env, userId, resource, deductAmount, exp
                 throw new Error('Firebase configuration missing');
             }
             
-            // path للمستخدم
             const userPath = `users/${userId}`;
             const resourcePath = `${userPath}/${resource}`;
             
-            // أولاً: نجلب المستخدم كاملاً للتحقق
             const userResult = await dbGet(env, userPath);
             if (!userResult.success || !userResult.data) {
                 return {
@@ -883,7 +907,6 @@ async function atomicUpdateUserResource(env, userId, resource, deductAmount, exp
             const user = userResult.data;
             const currentBalance = user[resource] || 0;
             
-            // التحقق من أن الرصيد لم يتغير عما كنا نتوقعه
             if (expectedBalance !== undefined && currentBalance !== expectedBalance) {
                 return {
                     success: false,
@@ -894,7 +917,6 @@ async function atomicUpdateUserResource(env, userId, resource, deductAmount, exp
                 };
             }
             
-            // التحقق من كفاية الرصيد (للخصم فقط)
             if (deductAmount > 0 && currentBalance < deductAmount) {
                 return {
                     success: false,
@@ -905,13 +927,10 @@ async function atomicUpdateUserResource(env, userId, resource, deductAmount, exp
                 };
             }
             
-            // حساب الرصيد الجديد
             const newBalance = currentBalance - deductAmount;
             
-            // محاولة التحديث بشرط أن الرصيد القديم لم يتغير
             const updateUrl = `${baseUrl}/${resourcePath}.json?key=${apiKey}`;
             
-            // نستخدم PUT مع optimistic locking
             const response = await fetch(updateUrl, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
@@ -920,7 +939,6 @@ async function atomicUpdateUserResource(env, userId, resource, deductAmount, exp
             
             if (!response.ok) {
                 const errorText = await response.text();
-                // إذا كان الخطأ بسبب تعارض (409) نعيد المحاولة
                 if (response.status === 409) {
                     attempt++;
                     if (attempt < maxAttempts) {
@@ -931,7 +949,6 @@ async function atomicUpdateUserResource(env, userId, resource, deductAmount, exp
                 throw new Error(`Atomic update failed: ${errorText}`);
             }
             
-            // تحديث باقي المستخدم (updatedAt)
             await dbUpdate(env, userPath, {
                 updatedAt: Date.now()
             });
@@ -1248,7 +1265,7 @@ async function updateReferralEarnings(env, referrerId, referredUserId, purchaseA
 }
 
 // ============================================
-// MACHINE PURCHASES - FIXED WITH ATOMIC UPDATES
+// MACHINE PURCHASES
 // ============================================
 
 async function handleBuyCow(env, userId, data) {
@@ -1300,7 +1317,6 @@ async function handleBuyCow(env, userId, data) {
                 user = productionResult.user;
             }
             
-            // التحقق من توفر العدد المطلوب عالمياً
             const cowsRemaining = GAME_CONSTANTS.COW_GLOBAL_CAP - (global.cows_sold || 0);
             if (cowsRemaining < buyQuantity) {
                 return {
@@ -1310,10 +1326,8 @@ async function handleBuyCow(env, userId, data) {
                 };
             }
             
-            // حساب السعر الإجمالي
             const totalPrice = GAME_CONSTANTS.COW_PRICE * buyQuantity;
             
-            // التحقق من كفاية الرصيد
             const currentBalance = user.tonBalance || 0;
             if (currentBalance < totalPrice) {
                 return {
@@ -1323,7 +1337,6 @@ async function handleBuyCow(env, userId, data) {
                 };
             }
             
-            // ========== ATOMIC UPDATE للرصيد ==========
             const atomicResult = await atomicUpdateUserResource(
                 env,
                 userId,
@@ -1355,13 +1368,11 @@ async function handleBuyCow(env, userId, data) {
                 }
             }
             
-            // تحديث بيانات المستخدم (cows_owned)
             const userUpdates = {
                 cows_owned: (user.cows_owned || 0) + buyQuantity,
                 updatedAt: Date.now()
             };
             
-            // تحديث البيانات العالمية
             const globalUpdates = {
                 cows_sold: (global.cows_sold || 0) + buyQuantity,
                 updatedAt: Date.now()
@@ -1370,7 +1381,6 @@ async function handleBuyCow(env, userId, data) {
             await dbUpdate(env, `users/${userId}`, userUpdates);
             await dbUpdate(env, 'global', globalUpdates);
             
-            // مكافأة الريفيرال (مرة واحدة فقط للمشتري)
             let referralCommission = 0;
             if (user.referredBy && (user.cows_owned === 0)) {
                 referralCommission = await updateReferralEarnings(
@@ -1382,7 +1392,6 @@ async function handleBuyCow(env, userId, data) {
                 );
             }
             
-            // تسجيل المعاملة
             await dbPush(env, `users/${userId}/transactions`, {
                 type: 'buy_cow',
                 quantity: buyQuantity,
@@ -1501,7 +1510,6 @@ async function handleBuyChicken(env, userId, data) {
                 };
             }
             
-            // ========== ATOMIC UPDATE للرصيد ==========
             const atomicResult = await atomicUpdateUserResource(
                 env,
                 userId,
@@ -1667,7 +1675,6 @@ async function handleBuyDiamondEngine(env, userId, data) {
                 };
             }
             
-            // ========== ATOMIC UPDATE للرصيد ==========
             const atomicResult = await atomicUpdateUserResource(
                 env,
                 userId,
@@ -1872,7 +1879,6 @@ async function handleHatchCow(env, userId, data) {
                 };
             }
             
-            // ========== ATOMIC UPDATE للحليب ==========
             const atomicResult = await atomicUpdateUserResource(
                 env,
                 userId,
@@ -1999,7 +2005,6 @@ async function handleHatchChicken(env, userId, data) {
                 };
             }
             
-            // ========== ATOMIC UPDATE للبيض ==========
             const atomicResult = await atomicUpdateUserResource(
                 env,
                 userId,
@@ -2135,8 +2140,6 @@ async function handleStartDiamondProduction(env, userId, data) {
                 };
             }
             
-            // ========== ATOMIC UPDATES للموارد ==========
-            // تحديث الحليب أولاً
             const milkAtomicResult = await atomicUpdateUserResource(
                 env,
                 userId,
@@ -2160,7 +2163,6 @@ async function handleStartDiamondProduction(env, userId, data) {
                 };
             }
             
-            // تحديث البيض بعد نجاح تحديث الحليب
             const eggsAtomicResult = await atomicUpdateUserResource(
                 env,
                 userId,
@@ -2170,7 +2172,6 @@ async function handleStartDiamondProduction(env, userId, data) {
             );
             
             if (!eggsAtomicResult.success) {
-                // في حالة فشل تحديث البيض، نعيد الحليب
                 await atomicUpdateUserResource(
                     env,
                     userId,
@@ -2193,7 +2194,6 @@ async function handleStartDiamondProduction(env, userId, data) {
                 };
             }
             
-            // إضافة الماس
             await dbUpdate(env, `users/${userId}`, {
                 diamond: (user.diamond || 0) + GAME_CONSTANTS.DIAMOND_PRODUCTION_YIELD,
                 updatedAt: Date.now()
@@ -2307,7 +2307,6 @@ async function handleConvertDiamond(env, userId, data) {
             const diamondPrice = global.diamond_price || GAME_CONSTANTS.DIAMOND_BASE_PRICE;
             const tonToReceive = diamondsToConvert * diamondPrice;
             
-            // ========== ATOMIC UPDATE للماس ==========
             const diamondAtomicResult = await atomicUpdateUserResource(
                 env,
                 userId,
@@ -2339,7 +2338,6 @@ async function handleConvertDiamond(env, userId, data) {
                 }
             }
             
-            // إضافة TON
             await dbUpdate(env, `users/${userId}`, {
                 tonBalance: (user.tonBalance || 0) + tonToReceive,
                 updatedAt: Date.now()
@@ -2390,13 +2388,9 @@ async function handleConvertDiamond(env, userId, data) {
 }
 
 // ============================================
-// MARKET - P2P ORDER BOOK WITH RACE CONDITION FIX
+// MARKET - P2P ORDER BOOK
 // ============================================
 
-/**
- * دالة محسنة لإنشاء طلب بيع مع منع سباق العمليات (Race Condition)
- * تستخدم optimistic locking مع إعادة المحاولة تلقائياً
- */
 async function handleCreateSellOrder(env, userId, data) {
     let attempt = 0;
     const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
@@ -2431,7 +2425,6 @@ async function handleCreateSellOrder(env, userId, data) {
                 };
             }
             
-            // جلب المستخدم مع حساب الإنتاج أولاً
             const userResult = await dbGet(env, `users/${userId}`);
             if (!userResult.success || !userResult.data) {
                 return {
@@ -2443,7 +2436,6 @@ async function handleCreateSellOrder(env, userId, data) {
             
             let user = userResult.data;
             
-            // حفظ الرصيد الحالي قبل الإنتاج للتحقق منه لاحقاً
             const productionResult = await calculateProduction(env, userId, user);
             if (productionResult) {
                 user = productionResult.user;
@@ -2451,7 +2443,6 @@ async function handleCreateSellOrder(env, userId, data) {
             
             const currentBalance = resource === 'milk' ? (user.milk || 0) : (user.eggs || 0);
             
-            // التحقق من كفاية الرصيد
             if (currentBalance < orderQuantity) {
                 return {
                     success: false,
@@ -2460,7 +2451,6 @@ async function handleCreateSellOrder(env, userId, data) {
                 };
             }
             
-            // التحقق من عدد الطلبات النشطة
             const activeOrdersResult = await dbGet(env, `users/${userId}/orders`);
             let activeOrders = 0;
             if (activeOrdersResult.success && activeOrdersResult.data) {
@@ -2474,23 +2464,19 @@ async function handleCreateSellOrder(env, userId, data) {
                 };
             }
             
-            // ========== ATOMIC UPDATE مع optimistic locking ==========
-            // نحاول تحديث الرصيد بشكل ذري
             const atomicResult = await atomicUpdateUserResource(
                 env, 
                 userId, 
                 resource, 
                 orderQuantity,
-                currentBalance // القيمة المتوقعة للرصيد
+                currentBalance
             );
             
             if (!atomicResult.success) {
-                // إذا فشل التحديث بسبب تغير الرصيد، نعيد المحاولة
                 if (atomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
                     attempt++;
                     if (attempt < maxAttempts) {
                         console.log(`Race condition detected for user ${userId} (sell order), retry attempt ${attempt}/${maxAttempts}`);
-                        // انتظار قصير قبل إعادة المحاولة
                         await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
                         continue;
                     } else {
@@ -2509,7 +2495,6 @@ async function handleCreateSellOrder(env, userId, data) {
                 }
             }
             
-            // ========== إنشاء الطلب بعد نجاح التحديث الذري ==========
             const now = Date.now();
             const orderId = `sell_${now}_${Math.random().toString(36).substring(2, 10)}_${attempt}`;
             
@@ -2526,7 +2511,6 @@ async function handleCreateSellOrder(env, userId, data) {
                 updatedAt: now
             };
             
-            // حفظ الطلب
             await dbSet(env, `orders/${orderId}`, orderData);
             await dbSet(env, `users/${userId}/orders/${orderId}`, {
                 id: orderId,
@@ -2539,7 +2523,6 @@ async function handleCreateSellOrder(env, userId, data) {
                 createdAt: now
             });
             
-            // تسجيل المعاملة
             await dbPush(env, `users/${userId}/transactions`, {
                 type: 'create_sell_order',
                 orderId: orderId,
@@ -2582,9 +2565,6 @@ async function handleCreateSellOrder(env, userId, data) {
     };
 }
 
-/**
- * دالة محسنة لإنشاء طلب شراء مع منع سباق العمليات
- */
 async function handleCreateBuyOrder(env, userId, data) {
     let attempt = 0;
     const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
@@ -2659,7 +2639,6 @@ async function handleCreateBuyOrder(env, userId, data) {
                 };
             }
             
-            // ========== ATOMIC UPDATE للرصيد ==========
             const atomicResult = await atomicUpdateUserResource(
                 env, 
                 userId, 
@@ -2691,7 +2670,6 @@ async function handleCreateBuyOrder(env, userId, data) {
                 }
             }
             
-            // ========== إنشاء الطلب ==========
             const now = Date.now();
             const orderId = `buy_${now}_${Math.random().toString(36).substring(2, 10)}_${attempt}`;
             
@@ -2762,9 +2740,6 @@ async function handleCreateBuyOrder(env, userId, data) {
     };
 }
 
-/**
- * دالة محسنة لتنفيذ الأوامر مع منع سباق العمليات
- */
 async function handleExecuteOrder(env, userId, data) {
     let attempt = 0;
     const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
@@ -2809,7 +2784,6 @@ async function handleExecuteOrder(env, userId, data) {
                 };
             }
             
-            // تحديد البائع والمشتري
             let buyerId, sellerId;
             if (order.type === 'sell') {
                 buyerId = userId;
@@ -2819,7 +2793,6 @@ async function handleExecuteOrder(env, userId, data) {
                 sellerId = userId;
             }
             
-            // جلب بيانات المشتري
             const buyerResult = await dbGet(env, `users/${buyerId}`);
             if (!buyerResult.success || !buyerResult.data) {
                 return {
@@ -2835,7 +2808,6 @@ async function handleExecuteOrder(env, userId, data) {
                 buyerData = buyerProduction.user;
             }
             
-            // جلب بيانات البائع
             const sellerResult = await dbGet(env, `users/${sellerId}`);
             if (!sellerResult.success || !sellerResult.data) {
                 return {
@@ -2855,11 +2827,7 @@ async function handleExecuteOrder(env, userId, data) {
             const fee = order.type === 'sell' ? totalCost * (GAME_CONSTANTS.MARKET_FEE_PERCENT / 100) : 0;
             const sellerReceives = order.type === 'sell' ? totalCost - fee : totalCost;
             
-            // ========== تنفيذ Atomic Updates ==========
             if (order.type === 'sell') {
-                // المشتري يدفع TON، البائع يستلم TON ناقص العمولة
-                
-                // التحقق من رصيد المشتري
                 const buyerTonBalance = buyerData.tonBalance || 0;
                 if (buyerTonBalance < totalCost) {
                     return {
@@ -2869,7 +2837,6 @@ async function handleExecuteOrder(env, userId, data) {
                     };
                 }
                 
-                // خصم TON من المشتري (atomic)
                 const buyerTonUpdate = await atomicUpdateUserResource(
                     env, buyerId, 'tonBalance', totalCost, buyerTonBalance
                 );
@@ -2888,7 +2855,6 @@ async function handleExecuteOrder(env, userId, data) {
                     };
                 }
                 
-                // إضافة الموارد للمشتري
                 if (order.resource === 'milk') {
                     await dbUpdate(env, `users/${buyerId}`, {
                         milk: (buyerData.milk || 0) + executeQuantity,
@@ -2901,13 +2867,11 @@ async function handleExecuteOrder(env, userId, data) {
                     });
                 }
                 
-                // إضافة TON للبائع (atomic)
                 const sellerTonBalance = sellerData.tonBalance || 0;
                 const sellerTonUpdate = await atomicUpdateUserResource(
                     env, sellerId, 'tonBalance', -sellerReceives, sellerTonBalance
                 );
                 if (!sellerTonUpdate.success) {
-                    // في حالة فشل إضافة الرصيد للبائع، نحتاج لاسترجاع رصيد المشتري
                     await atomicUpdateUserResource(env, buyerId, 'tonBalance', -totalCost, buyerData.tonBalance - totalCost);
                     if (sellerTonUpdate.errorCode === 'RACE_CONDITION_DETECTED') {
                         attempt++;
@@ -2924,10 +2888,6 @@ async function handleExecuteOrder(env, userId, data) {
                 }
                 
             } else {
-                // order.type === 'buy'
-                // البائع يبيع الموارد، المشتري يستلمها
-                
-                // التحقق من رصيد البائع
                 const sellerResourceBalance = order.resource === 'milk' ? 
                     (sellerData.milk || 0) : (sellerData.eggs || 0);
                 if (sellerResourceBalance < executeQuantity) {
@@ -2938,7 +2898,6 @@ async function handleExecuteOrder(env, userId, data) {
                     };
                 }
                 
-                // خصم الموارد من البائع (atomic)
                 const sellerResourceUpdate = await atomicUpdateUserResource(
                     env, sellerId, order.resource, executeQuantity, sellerResourceBalance
                 );
@@ -2957,14 +2916,12 @@ async function handleExecuteOrder(env, userId, data) {
                     };
                 }
                 
-                // إضافة TON للبائع
                 const sellerTonBalance = sellerData.tonBalance || 0;
                 await dbUpdate(env, `users/${sellerId}`, {
                     tonBalance: sellerTonBalance + totalCost,
                     updatedAt: Date.now()
                 });
                 
-                // إضافة الموارد للمشتري
                 const buyerResourceBalance = order.resource === 'milk' ? 
                     (buyerData.milk || 0) : (buyerData.eggs || 0);
                 if (order.resource === 'milk') {
@@ -2980,7 +2937,6 @@ async function handleExecuteOrder(env, userId, data) {
                 }
             }
             
-            // ========== تحديث حالة الطلب ==========
             const newRemaining = order.remaining - executeQuantity;
             const orderStatus = newRemaining <= 0 ? 'filled' : 'active';
             
@@ -2993,7 +2949,6 @@ async function handleExecuteOrder(env, userId, data) {
             await dbUpdate(env, `orders/${orderId}`, orderUpdates);
             await dbUpdate(env, `users/${order.userId}/orders/${orderId}`, orderUpdates);
             
-            // تسجيل المعاملة
             const txId = `tx_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
             
             await dbPush(env, `users/${buyerId}/transactions`, {
@@ -3021,7 +2976,6 @@ async function handleExecuteOrder(env, userId, data) {
                 timestamp: Date.now()
             });
             
-            // إرسال إشعار
             await notifyOrderFilled(env, order.userId, order, executeQuantity, totalCost, fee);
             
             return {
@@ -3189,9 +3143,6 @@ async function handleGetMyOrders(env, userId) {
     }
 }
 
-/**
- * دالة محسنة لإلغاء الطلبات مع منع سباق العمليات
- */
 async function handleCancelOrder(env, userId, data) {
     let attempt = 0;
     const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
@@ -3227,7 +3178,6 @@ async function handleCancelOrder(env, userId, data) {
                 };
             }
             
-            // جلب المستخدم
             const userResult = await dbGet(env, `users/${userId}`);
             if (!userResult.success || !userResult.data) {
                 return {
@@ -3244,16 +3194,14 @@ async function handleCancelOrder(env, userId, data) {
                 user = productionResult.user;
             }
             
-            // ========== إعادة الأموال مع التحقق الذري ==========
             if (order.type === 'sell') {
-                // إعادة الموارد
                 const resourceBalance = order.resource === 'milk' ? (user.milk || 0) : (user.eggs || 0);
                 
                 const atomicResult = await atomicUpdateUserResource(
                     env,
                     userId,
                     order.resource,
-                    -order.remaining, // إضافة (قيمة سالبة)
+                    -order.remaining,
                     resourceBalance
                 );
                 
@@ -3274,7 +3222,6 @@ async function handleCancelOrder(env, userId, data) {
                 }
                 
             } else {
-                // إعادة TON
                 const refundAmount = order.remaining * order.pricePerUnit;
                 const currentTonBalance = user.tonBalance || 0;
                 
@@ -3282,7 +3229,7 @@ async function handleCancelOrder(env, userId, data) {
                     env,
                     userId,
                     'tonBalance',
-                    -refundAmount, // إضافة (قيمة سالبة)
+                    -refundAmount,
                     currentTonBalance
                 );
                 
@@ -3303,7 +3250,6 @@ async function handleCancelOrder(env, userId, data) {
                 }
             }
             
-            // تحديث حالة الطلب
             const orderUpdates = {
                 status: 'cancelled',
                 updatedAt: Date.now()
@@ -3529,7 +3475,7 @@ async function handleVerifyDeposit(env, userId, data) {
 }
 
 // ============================================
-// WITHDRAWAL SYSTEM - FIXED WITH ATOMIC UPDATE
+// WITHDRAWAL SYSTEM
 // ============================================
 
 async function handleWithdraw(env, userId, data) {
@@ -3557,7 +3503,6 @@ async function handleWithdraw(env, userId, data) {
                 };
             }
             
-            // جلب المستخدم فقط للتحقق من وجوده
             const userResult = await dbGet(env, `users/${userId}`);
             if (!userResult.success || !userResult.data) {
                 return {
@@ -3569,7 +3514,6 @@ async function handleWithdraw(env, userId, data) {
             
             let user = userResult.data;
             
-            // حساب الإنتاج أولاً
             const productionResult = await calculateProduction(env, userId, user);
             if (productionResult) {
                 user = productionResult.user;
@@ -3577,7 +3521,6 @@ async function handleWithdraw(env, userId, data) {
             
             const currentBalance = user.tonBalance || 0;
             
-            // التحقق من كفاية الرصيد
             if (currentBalance < withdrawAmount) {
                 return {
                     success: false,
@@ -3589,7 +3532,6 @@ async function handleWithdraw(env, userId, data) {
             const fee = withdrawAmount * (GAME_CONSTANTS.WITHDRAW_FEE_PERCENT / 100);
             const netAmount = withdrawAmount - fee;
             
-            // ========== ATOMIC UPDATE للرصيد ==========
             const atomicResult = await atomicUpdateUserResource(
                 env,
                 userId,
@@ -3621,7 +3563,6 @@ async function handleWithdraw(env, userId, data) {
                 }
             }
             
-            // ========== إنشاء طلب السحب ==========
             const withdrawalId = `wd_${Date.now()}_${userId}_${attempt}`;
             const now = Date.now();
             
@@ -3726,12 +3667,11 @@ async function handleClaimReferralEarnings(env, userId) {
             const currentTonBalance = parseFloat(user.tonBalance || 0);
             const currentClaimed = parseFloat(user.referralEarningsClaimed || 0);
             
-            // ========== ATOMIC UPDATE لرصيد TON ==========
             const atomicResult = await atomicUpdateUserResource(
                 env,
                 userId,
                 'tonBalance',
-                -earnings, // إضافة (قيمة سالبة)
+                -earnings,
                 currentTonBalance
             );
             
@@ -3758,7 +3698,6 @@ async function handleClaimReferralEarnings(env, userId) {
                 }
             }
             
-            // تحديث referralEarnings
             const userUpdates = {
                 referralEarnings: 0,
                 referralEarningsClaimed: currentClaimed + earnings,
@@ -3943,7 +3882,6 @@ async function handleCreateTask(env, userId, data) {
                 };
             }
             
-            // ========== ATOMIC UPDATE للرصيد ==========
             const atomicResult = await atomicUpdateUserResource(
                 env,
                 userId,
@@ -4122,13 +4060,12 @@ async function handleVerifyTask(env, userId, data) {
             
             const reward = task.reward || GAME_CONSTANTS.TASK_REWARD;
             
-            // ========== ATOMIC UPDATE للرصيد ==========
             const currentBalance = user.tonBalance || 0;
             const atomicResult = await atomicUpdateUserResource(
                 env,
                 userId,
                 'tonBalance',
-                -reward, // إضافة (قيمة سالبة)
+                -reward,
                 currentBalance
             );
             
@@ -4455,7 +4392,6 @@ async function handleAdminApproveBounty(env, userId, data) {
                 };
             }
             
-            // جلب المستخدم
             const userResult = await dbGet(env, `users/${bounty.userId}`);
             if (!userResult.success || !userResult.data) {
                 return {
@@ -4470,7 +4406,6 @@ async function handleAdminApproveBounty(env, userId, data) {
             
             const now = Date.now();
             
-            // تحديث bounty status
             await dbUpdate(env, `bounties/${bountyId}`, {
                 status: 'approved',
                 reward: rewardAmount,
@@ -4485,12 +4420,11 @@ async function handleAdminApproveBounty(env, userId, data) {
                 updatedAt: now
             });
             
-            // ========== ATOMIC UPDATE للرصيد ==========
             const atomicResult = await atomicUpdateUserResource(
                 env,
                 bounty.userId,
                 'tonBalance',
-                -rewardAmount, // إضافة (قيمة سالبة)
+                -rewardAmount,
                 currentBalance
             );
             
@@ -4558,80 +4492,96 @@ async function handleAdminApproveBounty(env, userId, data) {
 }
 
 async function handleAdminRejectBounty(env, userId, data) {
-    try {
-        if (!ADMIN_IDS.includes(userId)) {
-            return {
-                success: false,
-                error: 'Unauthorized',
-                errorCode: 'UNAUTHORIZED'
-            };
-        }
-        
-        const { bountyId, reason } = data;
-        
-        if (!bountyId) {
-            return {
-                success: false,
-                error: 'Bounty ID required',
-                errorCode: 'INVALID_BOUNTY_ID'
-            };
-        }
-        
-        const bountyResult = await dbGet(env, `bounties/${bountyId}`);
-        
-        if (!bountyResult.success || !bountyResult.data) {
-            return {
-                success: false,
-                error: 'Bounty not found',
-                errorCode: 'BOUNTY_NOT_FOUND'
-            };
-        }
-        
-        const bounty = bountyResult.data;
-        
-        if (bounty.status !== 'pending') {
-            return {
-                success: false,
-                error: `Bounty is already ${bounty.status}`,
-                errorCode: 'BOUNTY_ALREADY_PROCESSED'
-            };
-        }
-        
-        const now = Date.now();
-        
-        await dbUpdate(env, `bounties/${bountyId}`, {
-            status: 'rejected',
-            rejectReason: reason || 'Not meeting requirements',
-            reviewedAt: now,
-            updatedAt: now
-        });
-        
-        await dbUpdate(env, `users/${bounty.userId}/bounties/${bountyId}`, {
-            status: 'rejected',
-            rejectReason: reason || 'Not meeting requirements',
-            reviewedAt: now,
-            updatedAt: now
-        });
-        
-        await notifyBountyRejected(env, bounty.userId, reason);
-        
-        return {
-            success: true,
-            data: {
-                bountyId: bountyId,
-                status: 'rejected',
-                reason: reason
+    let attempt = 0;
+    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
+    
+    while (attempt < maxAttempts) {
+        try {
+            if (!ADMIN_IDS.includes(userId)) {
+                return {
+                    success: false,
+                    error: 'Unauthorized',
+                    errorCode: 'UNAUTHORIZED'
+                };
             }
-        };
-        
-    } catch (error) {
-        console.error('Admin reject bounty error:', error);
-        return {
-            success: false,
-            error: error.message,
-            errorCode: 'ADMIN_REJECT_BOUNTY_ERROR'
-        };
+            
+            const { bountyId, reason } = data;
+            
+            if (!bountyId) {
+                return {
+                    success: false,
+                    error: 'Bounty ID required',
+                    errorCode: 'INVALID_BOUNTY_ID'
+                };
+            }
+            
+            const bountyResult = await dbGet(env, `bounties/${bountyId}`);
+            
+            if (!bountyResult.success || !bountyResult.data) {
+                return {
+                    success: false,
+                    error: 'Bounty not found',
+                    errorCode: 'BOUNTY_NOT_FOUND'
+                };
+            }
+            
+            const bounty = bountyResult.data;
+            
+            if (bounty.status !== 'pending') {
+                return {
+                    success: false,
+                    error: `Bounty is already ${bounty.status}`,
+                    errorCode: 'BOUNTY_ALREADY_PROCESSED'
+                };
+            }
+            
+            const now = Date.now();
+            
+            await dbUpdate(env, `bounties/${bountyId}`, {
+                status: 'rejected',
+                rejectReason: reason || 'Not meeting requirements',
+                reviewedAt: now,
+                updatedAt: now
+            });
+            
+            await dbUpdate(env, `users/${bounty.userId}/bounties/${bountyId}`, {
+                status: 'rejected',
+                rejectReason: reason || 'Not meeting requirements',
+                reviewedAt: now,
+                updatedAt: now
+            });
+            
+            await notifyBountyRejected(env, bounty.userId, reason);
+            
+            return {
+                success: true,
+                data: {
+                    bountyId: bountyId,
+                    status: 'rejected',
+                    reason: reason
+                }
+            };
+            
+        } catch (error) {
+            console.error(`Admin reject bounty error (attempt ${attempt + 1}):`, error);
+            attempt++;
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+            } else {
+                return {
+                    success: false,
+                    error: error.message,
+                    errorCode: 'ADMIN_REJECT_BOUNTY_ERROR'
+                };
+            }
+        }
     }
+    
+    return {
+        success: false,
+        error: 'Maximum retry attempts exceeded',
+        errorCode: 'MAX_RETRIES_EXCEEDED'
+    };
 }
 
 // ============================================
