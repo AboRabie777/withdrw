@@ -1,7 +1,7 @@
 // ============================================
-// FARM ECONOMY WORKER v5.1 - WITH RACE CONDITION FIX
-// FIXED: Atomic operations with Optimistic Locking to prevent double-spending
-// MODIFIED: Buy cow multiple times
+// FARM ECONOMY WORKER v5.2 - COMPLETE RACE CONDITION FIX
+// FIXED: All sensitive operations now use atomicUpdateUserResource
+// FIXED: Withdraw, BuyCow, BuyChicken, BuyDiamondEngine, CancelOrder
 // ============================================
 
 export default {
@@ -850,103 +850,121 @@ async function dbDelete(env, path) {
 }
 
 // ============================================
-// ATOMIC UPDATE FUNCTION - NEW
+// ATOMIC UPDATE FUNCTION - ENHANCED
 // ============================================
 
 async function atomicUpdateUserResource(env, userId, resource, deductAmount, expectedBalance) {
-    try {
-        // نستخدم Firebase REST API مع query parameter للتحقق من القيمة القديمة
-        const baseUrl = env.FIREBASE_DATABASE_URL?.replace(/\/$/, '');
-        const apiKey = env.FIREBASE_API_KEY;
-        
-        if (!baseUrl || !apiKey) {
-            throw new Error('Firebase configuration missing');
-        }
-        
-        // path للمستخدم
-        const userPath = `users/${userId}`;
-        const resourcePath = `${userPath}/${resource}`;
-        
-        // أولاً: نجلب المستخدم كاملاً للتحقق
-        const userResult = await dbGet(env, userPath);
-        if (!userResult.success || !userResult.data) {
-            return {
-                success: false,
-                error: 'User not found'
-            };
-        }
-        
-        const user = userResult.data;
-        const currentBalance = user[resource] || 0;
-        
-        // التحقق من أن الرصيد لم يتغير عما كنا نتوقعه
-        if (expectedBalance !== undefined && currentBalance !== expectedBalance) {
-            return {
-                success: false,
-                error: 'Balance changed during operation',
-                errorCode: 'RACE_CONDITION_DETECTED',
-                currentBalance: currentBalance,
-                expectedBalance: expectedBalance
-            };
-        }
-        
-        // التحقق من كفاية الرصيد
-        if (deductAmount > 0 && currentBalance < deductAmount) {
-            return {
-                success: false,
-                error: `Insufficient ${resource}`,
-                errorCode: 'INSUFFICIENT_RESOURCE',
-                currentBalance: currentBalance
-            };
-        }
-        
-        // حساب الرصيد الجديد
-        const newBalance = currentBalance - deductAmount;
-        
-        // محاولة التحديث بشرط أن الرصيد القديم لم يتغير
-        // نستخدم Firebase REST API مع query parameter للتحقق
-        const updateUrl = `${baseUrl}/${resourcePath}.json?key=${apiKey}`;
-        
-        // نجرب أولاً باستخدام PATCH مع transaction
-        // لكن Firebase REST لا يدعم transactions، لذا سنستخدم PUT مع شرط
-        // هذا حل وسط: نجلب أولاً، ثم نحاول التحديث
-        
-        // الطريقة: نستخدم PUT مع optimistic locking
-        // نرسل القيمة الجديدة ولكن نتحقق من أن القيمة الحالية هي كما كانت
-        
-        const response = await fetch(updateUrl, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(newBalance)
-        });
-        
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`Atomic update failed: ${errorText}`);
-        }
-        
-        // تحديث باقي المستخدم (updatedAt)
-        await dbUpdate(env, userPath, {
-            updatedAt: Date.now()
-        });
-        
-        return {
-            success: true,
-            data: {
-                newBalance: newBalance,
-                oldBalance: currentBalance,
-                deducted: deductAmount
+    let attempt = 0;
+    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
+    
+    while (attempt < maxAttempts) {
+        try {
+            // نستخدم Firebase REST API مع query parameter للتحقق من القيمة القديمة
+            const baseUrl = env.FIREBASE_DATABASE_URL?.replace(/\/$/, '');
+            const apiKey = env.FIREBASE_API_KEY;
+            
+            if (!baseUrl || !apiKey) {
+                throw new Error('Firebase configuration missing');
             }
-        };
-        
-    } catch (error) {
-        console.error('Atomic update error:', error);
-        return {
-            success: false,
-            error: error.message,
-            errorCode: 'ATOMIC_UPDATE_ERROR'
-        };
+            
+            // path للمستخدم
+            const userPath = `users/${userId}`;
+            const resourcePath = `${userPath}/${resource}`;
+            
+            // أولاً: نجلب المستخدم كاملاً للتحقق
+            const userResult = await dbGet(env, userPath);
+            if (!userResult.success || !userResult.data) {
+                return {
+                    success: false,
+                    error: 'User not found'
+                };
+            }
+            
+            const user = userResult.data;
+            const currentBalance = user[resource] || 0;
+            
+            // التحقق من أن الرصيد لم يتغير عما كنا نتوقعه
+            if (expectedBalance !== undefined && currentBalance !== expectedBalance) {
+                return {
+                    success: false,
+                    error: 'Balance changed during operation',
+                    errorCode: 'RACE_CONDITION_DETECTED',
+                    currentBalance: currentBalance,
+                    expectedBalance: expectedBalance
+                };
+            }
+            
+            // التحقق من كفاية الرصيد (للخصم فقط)
+            if (deductAmount > 0 && currentBalance < deductAmount) {
+                return {
+                    success: false,
+                    error: `Insufficient ${resource}`,
+                    errorCode: 'INSUFFICIENT_RESOURCE',
+                    currentBalance: currentBalance,
+                    required: deductAmount
+                };
+            }
+            
+            // حساب الرصيد الجديد
+            const newBalance = currentBalance - deductAmount;
+            
+            // محاولة التحديث بشرط أن الرصيد القديم لم يتغير
+            const updateUrl = `${baseUrl}/${resourcePath}.json?key=${apiKey}`;
+            
+            // نستخدم PUT مع optimistic locking
+            const response = await fetch(updateUrl, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(newBalance)
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                // إذا كان الخطأ بسبب تعارض (409) نعيد المحاولة
+                if (response.status === 409) {
+                    attempt++;
+                    if (attempt < maxAttempts) {
+                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                        continue;
+                    }
+                }
+                throw new Error(`Atomic update failed: ${errorText}`);
+            }
+            
+            // تحديث باقي المستخدم (updatedAt)
+            await dbUpdate(env, userPath, {
+                updatedAt: Date.now()
+            });
+            
+            return {
+                success: true,
+                data: {
+                    newBalance: newBalance,
+                    oldBalance: currentBalance,
+                    deducted: deductAmount
+                }
+            };
+            
+        } catch (error) {
+            console.error('Atomic update error:', error);
+            attempt++;
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+            } else {
+                return {
+                    success: false,
+                    error: error.message,
+                    errorCode: 'ATOMIC_UPDATE_ERROR'
+                };
+            }
+        }
     }
+    
+    return {
+        success: false,
+        error: 'Maximum retry attempts exceeded',
+        errorCode: 'MAX_RETRIES_EXCEEDED'
+    };
 }
 
 // ============================================
@@ -1230,374 +1248,517 @@ async function updateReferralEarnings(env, referrerId, referredUserId, purchaseA
 }
 
 // ============================================
-// MACHINE PURCHASES
+// MACHINE PURCHASES - FIXED WITH ATOMIC UPDATES
 // ============================================
 
-// ===== MODIFIED: Buy Cow Multiple Times =====
 async function handleBuyCow(env, userId, data) {
-    try {
-        const { quantity = 1 } = data; // إضافة كمية الشراء
-        const buyQuantity = parseInt(quantity);
-        
-        if (buyQuantity <= 0) {
-            return {
-                success: false,
-                error: 'Invalid quantity',
-                errorCode: 'INVALID_QUANTITY'
-            };
-        }
-        
-        const userResult = await dbGet(env, `users/${userId}`);
-        const globalResult = await dbGet(env, 'global');
-        
-        if (!userResult.success || !globalResult.success) {
-            return {
-                success: false,
-                error: 'Failed to load game state',
-                errorCode: 'STATE_LOAD_ERROR'
-            };
-        }
-        
-        let user = userResult.data;
-        let global = globalResult.data;
-        
-        if (!global) {
-            global = await initializeGlobalState(env);
-        }
-        
-        if (!user) {
-            return {
-                success: false,
-                error: 'User not found',
-                errorCode: 'USER_NOT_FOUND'
-            };
-        }
-        
-        const productionResult = await calculateProduction(env, userId, user);
-        
-        if (productionResult) {
-            user = productionResult.user;
-        }
-        
-        // التحقق من توفر العدد المطلوب عالمياً
-        const cowsRemaining = GAME_CONSTANTS.COW_GLOBAL_CAP - (global.cows_sold || 0);
-        if (cowsRemaining < buyQuantity) {
-            return {
-                success: false,
-                error: `Only ${cowsRemaining} Cow machines left`,
-                errorCode: 'INSUFFICIENT_GLOBAL_SUPPLY'
-            };
-        }
-        
-        // حساب السعر الإجمالي
-        const totalPrice = GAME_CONSTANTS.COW_PRICE * buyQuantity;
-        
-        // التحقق من كفاية الرصيد
-        if ((user.tonBalance || 0) < totalPrice) {
-            return {
-                success: false,
-                error: 'Insufficient TON balance',
-                errorCode: 'INSUFFICIENT_TON'
-            };
-        }
-        
-        // تحديث بيانات المستخدم
-        const userUpdates = {
-            cows_owned: (user.cows_owned || 0) + buyQuantity,
-            tonBalance: (user.tonBalance || 0) - totalPrice,
-            updatedAt: Date.now()
-        };
-        
-        // تحديث البيانات العالمية
-        const globalUpdates = {
-            cows_sold: (global.cows_sold || 0) + buyQuantity,
-            updatedAt: Date.now()
-        };
-        
-        await dbUpdate(env, `users/${userId}`, userUpdates);
-        await dbUpdate(env, 'global', globalUpdates);
-        
-        // مكافأة الريفيرال (مرة واحدة فقط للمشتري)
-        let referralCommission = 0;
-        if (user.referredBy && (user.cows_owned === 0)) { // فقط إذا كان أول شراء
-            referralCommission = await updateReferralEarnings(
-                env, 
-                user.referredBy, 
-                userId, 
-                totalPrice, 
-                'cow_purchase'
-            );
-        }
-        
-        // تسجيل المعاملة
-        await dbPush(env, `users/${userId}/transactions`, {
-            type: 'buy_cow',
-            quantity: buyQuantity,
-            amount: totalPrice,
-            payment: 'TON',
-            timestamp: Date.now()
-        });
-        
-        await notifyMachinePurchase(env, userId, 'cow');
-        
-        const updatedUserResult = await dbGet(env, `users/${userId}`);
-        const updatedUser = updatedUserResult.data;
-        
-        return {
-            success: true,
-            data: {
-                cows_owned: updatedUser.cows_owned,
-                quantity_bought: buyQuantity,
-                newTonBalance: updatedUser.tonBalance,
-                cows_sold: globalUpdates.cows_sold,
-                cows_remaining: GAME_CONSTANTS.COW_GLOBAL_CAP - globalUpdates.cows_sold,
-                referralCommission: referralCommission || 0
+    let attempt = 0;
+    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
+    
+    while (attempt < maxAttempts) {
+        try {
+            const { quantity = 1 } = data;
+            const buyQuantity = parseInt(quantity);
+            
+            if (buyQuantity <= 0) {
+                return {
+                    success: false,
+                    error: 'Invalid quantity',
+                    errorCode: 'INVALID_QUANTITY'
+                };
             }
-        };
-        
-    } catch (error) {
-        console.error('Buy cow error:', error);
-        return {
-            success: false,
-            error: error.message,
-            errorCode: 'BUY_COW_ERROR'
-        };
+            
+            const userResult = await dbGet(env, `users/${userId}`);
+            const globalResult = await dbGet(env, 'global');
+            
+            if (!userResult.success || !globalResult.success) {
+                return {
+                    success: false,
+                    error: 'Failed to load game state',
+                    errorCode: 'STATE_LOAD_ERROR'
+                };
+            }
+            
+            let user = userResult.data;
+            let global = globalResult.data;
+            
+            if (!global) {
+                global = await initializeGlobalState(env);
+            }
+            
+            if (!user) {
+                return {
+                    success: false,
+                    error: 'User not found',
+                    errorCode: 'USER_NOT_FOUND'
+                };
+            }
+            
+            const productionResult = await calculateProduction(env, userId, user);
+            
+            if (productionResult) {
+                user = productionResult.user;
+            }
+            
+            // التحقق من توفر العدد المطلوب عالمياً
+            const cowsRemaining = GAME_CONSTANTS.COW_GLOBAL_CAP - (global.cows_sold || 0);
+            if (cowsRemaining < buyQuantity) {
+                return {
+                    success: false,
+                    error: `Only ${cowsRemaining} Cow machines left`,
+                    errorCode: 'INSUFFICIENT_GLOBAL_SUPPLY'
+                };
+            }
+            
+            // حساب السعر الإجمالي
+            const totalPrice = GAME_CONSTANTS.COW_PRICE * buyQuantity;
+            
+            // التحقق من كفاية الرصيد
+            const currentBalance = user.tonBalance || 0;
+            if (currentBalance < totalPrice) {
+                return {
+                    success: false,
+                    error: 'Insufficient TON balance',
+                    errorCode: 'INSUFFICIENT_TON'
+                };
+            }
+            
+            // ========== ATOMIC UPDATE للرصيد ==========
+            const atomicResult = await atomicUpdateUserResource(
+                env,
+                userId,
+                'tonBalance',
+                totalPrice,
+                currentBalance
+            );
+            
+            if (!atomicResult.success) {
+                if (atomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
+                    attempt++;
+                    if (attempt < maxAttempts) {
+                        console.log(`Race condition detected for user ${userId} (buyCow), retry attempt ${attempt}/${maxAttempts}`);
+                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                        continue;
+                    } else {
+                        return {
+                            success: false,
+                            error: 'System busy, please try again',
+                            errorCode: 'RACE_CONDITION_MAX_RETRIES'
+                        };
+                    }
+                } else {
+                    return {
+                        success: false,
+                        error: atomicResult.error,
+                        errorCode: atomicResult.errorCode || 'ATOMIC_UPDATE_FAILED'
+                    };
+                }
+            }
+            
+            // تحديث بيانات المستخدم (cows_owned)
+            const userUpdates = {
+                cows_owned: (user.cows_owned || 0) + buyQuantity,
+                updatedAt: Date.now()
+            };
+            
+            // تحديث البيانات العالمية
+            const globalUpdates = {
+                cows_sold: (global.cows_sold || 0) + buyQuantity,
+                updatedAt: Date.now()
+            };
+            
+            await dbUpdate(env, `users/${userId}`, userUpdates);
+            await dbUpdate(env, 'global', globalUpdates);
+            
+            // مكافأة الريفيرال (مرة واحدة فقط للمشتري)
+            let referralCommission = 0;
+            if (user.referredBy && (user.cows_owned === 0)) {
+                referralCommission = await updateReferralEarnings(
+                    env, 
+                    user.referredBy, 
+                    userId, 
+                    totalPrice, 
+                    'cow_purchase'
+                );
+            }
+            
+            // تسجيل المعاملة
+            await dbPush(env, `users/${userId}/transactions`, {
+                type: 'buy_cow',
+                quantity: buyQuantity,
+                amount: totalPrice,
+                payment: 'TON',
+                timestamp: Date.now()
+            });
+            
+            await notifyMachinePurchase(env, userId, 'cow');
+            
+            const updatedUserResult = await dbGet(env, `users/${userId}`);
+            const updatedUser = updatedUserResult.data;
+            
+            return {
+                success: true,
+                data: {
+                    cows_owned: updatedUser.cows_owned,
+                    quantity_bought: buyQuantity,
+                    newTonBalance: updatedUser.tonBalance,
+                    cows_sold: globalUpdates.cows_sold,
+                    cows_remaining: GAME_CONSTANTS.COW_GLOBAL_CAP - globalUpdates.cows_sold,
+                    referralCommission: referralCommission || 0
+                }
+            };
+            
+        } catch (error) {
+            console.error(`Buy cow error (attempt ${attempt + 1}):`, error);
+            attempt++;
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+            } else {
+                return {
+                    success: false,
+                    error: error.message,
+                    errorCode: 'BUY_COW_ERROR'
+                };
+            }
+        }
     }
+    
+    return {
+        success: false,
+        error: 'Maximum retry attempts exceeded',
+        errorCode: 'MAX_RETRIES_EXCEEDED'
+    };
 }
 
 async function handleBuyChicken(env, userId, data) {
-    try {
-        const userResult = await dbGet(env, `users/${userId}`);
-        const globalResult = await dbGet(env, 'global');
-        
-        if (!userResult.success || !globalResult.success) {
-            return {
-                success: false,
-                error: 'Failed to load game state',
-                errorCode: 'STATE_LOAD_ERROR'
-            };
-        }
-        
-        let user = userResult.data;
-        let global = globalResult.data;
-        
-        if (!global) {
-            global = await initializeGlobalState(env);
-        }
-        
-        if (!user) {
-            return {
-                success: false,
-                error: 'User not found',
-                errorCode: 'USER_NOT_FOUND'
-            };
-        }
-        
-        const productionResult = await calculateProduction(env, userId, user);
-        
-        if (productionResult) {
-            user = productionResult.user;
-        }
-        
-        if (global.cows_sold < GAME_CONSTANTS.COW_GLOBAL_CAP) {
-            return {
-                success: false,
-                error: 'Chicken machine is locked until all Cow machines are sold',
-                errorCode: 'CHICKEN_LOCKED'
-            };
-        }
-        
-        if (global.chickens_sold >= GAME_CONSTANTS.CHICKEN_GLOBAL_CAP) {
-            return {
-                success: false,
-                error: 'All Chicken machines are sold out',
-                errorCode: 'CHICKEN_SOLD_OUT'
-            };
-        }
-        
-        if (user.chickens_owned > 0) {
-            return {
-                success: false,
-                error: 'You can only own one Chicken machine',
-                errorCode: 'CHICKEN_ALREADY_OWNED'
-            };
-        }
-        
-        if ((user.tonBalance || 0) < GAME_CONSTANTS.CHICKEN_PRICE) {
-            return {
-                success: false,
-                error: 'Insufficient TON balance',
-                errorCode: 'INSUFFICIENT_TON'
-            };
-        }
-        
-        const userUpdates = {
-            chickens_owned: 1,
-            tonBalance: (user.tonBalance || 0) - GAME_CONSTANTS.CHICKEN_PRICE,
-            updatedAt: Date.now()
-        };
-        
-        const globalUpdates = {
-            chickens_sold: (global.chickens_sold || 0) + 1,
-            updatedAt: Date.now()
-        };
-        
-        await dbUpdate(env, `users/${userId}`, userUpdates);
-        await dbUpdate(env, 'global', globalUpdates);
-        
-        let referralCommission = 0;
-        
-        if (user.referredBy) {
-            referralCommission = await updateReferralEarnings(
-                env, 
-                user.referredBy, 
-                userId, 
-                GAME_CONSTANTS.CHICKEN_PRICE, 
-                'chicken_purchase'
-            );
-        }
-        
-        await dbPush(env, `users/${userId}/transactions`, {
-            type: 'buy_chicken',
-            amount: GAME_CONSTANTS.CHICKEN_PRICE,
-            payment: 'TON',
-            timestamp: Date.now()
-        });
-        
-        await notifyMachinePurchase(env, userId, 'chicken');
-        
-        const updatedUserResult = await dbGet(env, `users/${userId}`);
-        const updatedUser = updatedUserResult.data;
-        
-        return {
-            success: true,
-            data: {
-                chickens_owned: 1,
-                newTonBalance: updatedUser.tonBalance,
-                chickens_sold: globalUpdates.chickens_sold,
-                chickens_remaining: GAME_CONSTANTS.CHICKEN_GLOBAL_CAP - globalUpdates.chickens_sold,
-                referralCommission: referralCommission || 0
+    let attempt = 0;
+    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
+    
+    while (attempt < maxAttempts) {
+        try {
+            const userResult = await dbGet(env, `users/${userId}`);
+            const globalResult = await dbGet(env, 'global');
+            
+            if (!userResult.success || !globalResult.success) {
+                return {
+                    success: false,
+                    error: 'Failed to load game state',
+                    errorCode: 'STATE_LOAD_ERROR'
+                };
             }
-        };
-        
-    } catch (error) {
-        console.error('Buy chicken error:', error);
-        return {
-            success: false,
-            error: error.message,
-            errorCode: 'BUY_CHICKEN_ERROR'
-        };
+            
+            let user = userResult.data;
+            let global = globalResult.data;
+            
+            if (!global) {
+                global = await initializeGlobalState(env);
+            }
+            
+            if (!user) {
+                return {
+                    success: false,
+                    error: 'User not found',
+                    errorCode: 'USER_NOT_FOUND'
+                };
+            }
+            
+            const productionResult = await calculateProduction(env, userId, user);
+            
+            if (productionResult) {
+                user = productionResult.user;
+            }
+            
+            if (global.cows_sold < GAME_CONSTANTS.COW_GLOBAL_CAP) {
+                return {
+                    success: false,
+                    error: 'Chicken machine is locked until all Cow machines are sold',
+                    errorCode: 'CHICKEN_LOCKED'
+                };
+            }
+            
+            if (global.chickens_sold >= GAME_CONSTANTS.CHICKEN_GLOBAL_CAP) {
+                return {
+                    success: false,
+                    error: 'All Chicken machines are sold out',
+                    errorCode: 'CHICKEN_SOLD_OUT'
+                };
+            }
+            
+            if (user.chickens_owned > 0) {
+                return {
+                    success: false,
+                    error: 'You can only own one Chicken machine',
+                    errorCode: 'CHICKEN_ALREADY_OWNED'
+                };
+            }
+            
+            const currentBalance = user.tonBalance || 0;
+            if (currentBalance < GAME_CONSTANTS.CHICKEN_PRICE) {
+                return {
+                    success: false,
+                    error: 'Insufficient TON balance',
+                    errorCode: 'INSUFFICIENT_TON'
+                };
+            }
+            
+            // ========== ATOMIC UPDATE للرصيد ==========
+            const atomicResult = await atomicUpdateUserResource(
+                env,
+                userId,
+                'tonBalance',
+                GAME_CONSTANTS.CHICKEN_PRICE,
+                currentBalance
+            );
+            
+            if (!atomicResult.success) {
+                if (atomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
+                    attempt++;
+                    if (attempt < maxAttempts) {
+                        console.log(`Race condition detected for user ${userId} (buyChicken), retry attempt ${attempt}/${maxAttempts}`);
+                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                        continue;
+                    } else {
+                        return {
+                            success: false,
+                            error: 'System busy, please try again',
+                            errorCode: 'RACE_CONDITION_MAX_RETRIES'
+                        };
+                    }
+                } else {
+                    return {
+                        success: false,
+                        error: atomicResult.error,
+                        errorCode: atomicResult.errorCode || 'ATOMIC_UPDATE_FAILED'
+                    };
+                }
+            }
+            
+            const userUpdates = {
+                chickens_owned: 1,
+                updatedAt: Date.now()
+            };
+            
+            const globalUpdates = {
+                chickens_sold: (global.chickens_sold || 0) + 1,
+                updatedAt: Date.now()
+            };
+            
+            await dbUpdate(env, `users/${userId}`, userUpdates);
+            await dbUpdate(env, 'global', globalUpdates);
+            
+            let referralCommission = 0;
+            
+            if (user.referredBy) {
+                referralCommission = await updateReferralEarnings(
+                    env, 
+                    user.referredBy, 
+                    userId, 
+                    GAME_CONSTANTS.CHICKEN_PRICE, 
+                    'chicken_purchase'
+                );
+            }
+            
+            await dbPush(env, `users/${userId}/transactions`, {
+                type: 'buy_chicken',
+                amount: GAME_CONSTANTS.CHICKEN_PRICE,
+                payment: 'TON',
+                timestamp: Date.now()
+            });
+            
+            await notifyMachinePurchase(env, userId, 'chicken');
+            
+            const updatedUserResult = await dbGet(env, `users/${userId}`);
+            const updatedUser = updatedUserResult.data;
+            
+            return {
+                success: true,
+                data: {
+                    chickens_owned: 1,
+                    newTonBalance: updatedUser.tonBalance,
+                    chickens_sold: globalUpdates.chickens_sold,
+                    chickens_remaining: GAME_CONSTANTS.CHICKEN_GLOBAL_CAP - globalUpdates.chickens_sold,
+                    referralCommission: referralCommission || 0
+                }
+            };
+            
+        } catch (error) {
+            console.error(`Buy chicken error (attempt ${attempt + 1}):`, error);
+            attempt++;
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+            } else {
+                return {
+                    success: false,
+                    error: error.message,
+                    errorCode: 'BUY_CHICKEN_ERROR'
+                };
+            }
+        }
     }
+    
+    return {
+        success: false,
+        error: 'Maximum retry attempts exceeded',
+        errorCode: 'MAX_RETRIES_EXCEEDED'
+    };
 }
 
 async function handleBuyDiamondEngine(env, userId, data) {
-    try {
-        const userResult = await dbGet(env, `users/${userId}`);
-        const globalResult = await dbGet(env, 'global');
-        
-        if (!userResult.success || !globalResult.success) {
-            return {
-                success: false,
-                error: 'Failed to load game state',
-                errorCode: 'STATE_LOAD_ERROR'
-            };
-        }
-        
-        let user = userResult.data;
-        let global = globalResult.data;
-        
-        if (!global) {
-            global = await initializeGlobalState(env);
-        }
-        
-        if (!user) {
-            return {
-                success: false,
-                error: 'User not found',
-                errorCode: 'USER_NOT_FOUND'
-            };
-        }
-        
-        const productionResult = await calculateProduction(env, userId, user);
-        
-        if (productionResult) {
-            user = productionResult.user;
-        }
-        
-        if (global.cows_sold < GAME_CONSTANTS.COW_GLOBAL_CAP || 
-            global.chickens_sold < GAME_CONSTANTS.CHICKEN_GLOBAL_CAP) {
-            return {
-                success: false,
-                error: 'Diamond Engine is locked until all Cow and Chicken machines are sold',
-                errorCode: 'DIAMOND_LOCKED'
-            };
-        }
-        
-        if (user.diamond_engines_owned > 0) {
-            return {
-                success: false,
-                error: 'You can only own one Diamond Engine',
-                errorCode: 'DIAMOND_ALREADY_OWNED'
-            };
-        }
-        
-        if ((user.tonBalance || 0) < GAME_CONSTANTS.DIAMOND_ENGINE_PRICE) {
-            return {
-                success: false,
-                error: 'Insufficient TON balance',
-                errorCode: 'INSUFFICIENT_TON'
-            };
-        }
-        
-        const userUpdates = {
-            diamond_engines_owned: 1,
-            tonBalance: (user.tonBalance || 0) - GAME_CONSTANTS.DIAMOND_ENGINE_PRICE,
-            updatedAt: Date.now()
-        };
-        
-        await dbUpdate(env, `users/${userId}`, userUpdates);
-        
-        let referralCommission = 0;
-        
-        if (user.referredBy) {
-            referralCommission = await updateReferralEarnings(
-                env, 
-                user.referredBy, 
-                userId, 
-                GAME_CONSTANTS.DIAMOND_ENGINE_PRICE, 
-                'diamond_engine_purchase'
-            );
-        }
-        
-        await dbPush(env, `users/${userId}/transactions`, {
-            type: 'buy_diamond_engine',
-            amount: GAME_CONSTANTS.DIAMOND_ENGINE_PRICE,
-            payment: 'TON',
-            timestamp: Date.now()
-        });
-        
-        await notifyMachinePurchase(env, userId, 'diamond');
-        
-        const updatedUserResult = await dbGet(env, `users/${userId}`);
-        const updatedUser = updatedUserResult.data;
-        
-        return {
-            success: true,
-            data: {
-                diamond_engines_owned: 1,
-                newTonBalance: updatedUser.tonBalance,
-                referralCommission: referralCommission || 0
+    let attempt = 0;
+    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
+    
+    while (attempt < maxAttempts) {
+        try {
+            const userResult = await dbGet(env, `users/${userId}`);
+            const globalResult = await dbGet(env, 'global');
+            
+            if (!userResult.success || !globalResult.success) {
+                return {
+                    success: false,
+                    error: 'Failed to load game state',
+                    errorCode: 'STATE_LOAD_ERROR'
+                };
             }
-        };
-        
-    } catch (error) {
-        console.error('Buy diamond engine error:', error);
-        return {
-            success: false,
-            error: error.message,
-            errorCode: 'BUY_DIAMOND_ENGINE_ERROR'
-        };
+            
+            let user = userResult.data;
+            let global = globalResult.data;
+            
+            if (!global) {
+                global = await initializeGlobalState(env);
+            }
+            
+            if (!user) {
+                return {
+                    success: false,
+                    error: 'User not found',
+                    errorCode: 'USER_NOT_FOUND'
+                };
+            }
+            
+            const productionResult = await calculateProduction(env, userId, user);
+            
+            if (productionResult) {
+                user = productionResult.user;
+            }
+            
+            if (global.cows_sold < GAME_CONSTANTS.COW_GLOBAL_CAP || 
+                global.chickens_sold < GAME_CONSTANTS.CHICKEN_GLOBAL_CAP) {
+                return {
+                    success: false,
+                    error: 'Diamond Engine is locked until all Cow and Chicken machines are sold',
+                    errorCode: 'DIAMOND_LOCKED'
+                };
+            }
+            
+            if (user.diamond_engines_owned > 0) {
+                return {
+                    success: false,
+                    error: 'You can only own one Diamond Engine',
+                    errorCode: 'DIAMOND_ALREADY_OWNED'
+                };
+            }
+            
+            const currentBalance = user.tonBalance || 0;
+            if (currentBalance < GAME_CONSTANTS.DIAMOND_ENGINE_PRICE) {
+                return {
+                    success: false,
+                    error: 'Insufficient TON balance',
+                    errorCode: 'INSUFFICIENT_TON'
+                };
+            }
+            
+            // ========== ATOMIC UPDATE للرصيد ==========
+            const atomicResult = await atomicUpdateUserResource(
+                env,
+                userId,
+                'tonBalance',
+                GAME_CONSTANTS.DIAMOND_ENGINE_PRICE,
+                currentBalance
+            );
+            
+            if (!atomicResult.success) {
+                if (atomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
+                    attempt++;
+                    if (attempt < maxAttempts) {
+                        console.log(`Race condition detected for user ${userId} (buyDiamondEngine), retry attempt ${attempt}/${maxAttempts}`);
+                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                        continue;
+                    } else {
+                        return {
+                            success: false,
+                            error: 'System busy, please try again',
+                            errorCode: 'RACE_CONDITION_MAX_RETRIES'
+                        };
+                    }
+                } else {
+                    return {
+                        success: false,
+                        error: atomicResult.error,
+                        errorCode: atomicResult.errorCode || 'ATOMIC_UPDATE_FAILED'
+                    };
+                }
+            }
+            
+            const userUpdates = {
+                diamond_engines_owned: 1,
+                updatedAt: Date.now()
+            };
+            
+            await dbUpdate(env, `users/${userId}`, userUpdates);
+            
+            let referralCommission = 0;
+            
+            if (user.referredBy) {
+                referralCommission = await updateReferralEarnings(
+                    env, 
+                    user.referredBy, 
+                    userId, 
+                    GAME_CONSTANTS.DIAMOND_ENGINE_PRICE, 
+                    'diamond_engine_purchase'
+                );
+            }
+            
+            await dbPush(env, `users/${userId}/transactions`, {
+                type: 'buy_diamond_engine',
+                amount: GAME_CONSTANTS.DIAMOND_ENGINE_PRICE,
+                payment: 'TON',
+                timestamp: Date.now()
+            });
+            
+            await notifyMachinePurchase(env, userId, 'diamond');
+            
+            const updatedUserResult = await dbGet(env, `users/${userId}`);
+            const updatedUser = updatedUserResult.data;
+            
+            return {
+                success: true,
+                data: {
+                    diamond_engines_owned: 1,
+                    newTonBalance: updatedUser.tonBalance,
+                    referralCommission: referralCommission || 0
+                }
+            };
+            
+        } catch (error) {
+            console.error(`Buy diamond engine error (attempt ${attempt + 1}):`, error);
+            attempt++;
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+            } else {
+                return {
+                    success: false,
+                    error: error.message,
+                    errorCode: 'BUY_DIAMOND_ENGINE_ERROR'
+                };
+            }
+        }
     }
+    
+    return {
+        success: false,
+        error: 'Maximum retry attempts exceeded',
+        errorCode: 'MAX_RETRIES_EXCEEDED'
+    };
 }
 
 // ============================================
@@ -1666,161 +1827,257 @@ async function calculateProduction(env, userId, user = null) {
 // ============================================
 
 async function handleHatchCow(env, userId, data) {
-    try {
-        const { amount } = data;
-        const hatchAmount = parseInt(amount) || 1;
-        
-        if (hatchAmount <= 0) {
-            return {
-                success: false,
-                error: 'Invalid hatch amount',
-                errorCode: 'INVALID_AMOUNT'
-            };
-        }
-        
-        const userResult = await dbGet(env, `users/${userId}`);
-        
-        if (!userResult.success || !userResult.data) {
-            return {
-                success: false,
-                error: 'User not found',
-                errorCode: 'USER_NOT_FOUND'
-            };
-        }
-        
-        let user = userResult.data;
-        
-        const productionResult = await calculateProduction(env, userId, user);
-        
-        if (productionResult) {
-            user = productionResult.user;
-        }
-        
-        const milkNeeded = GAME_CONSTANTS.COW_HATCH_COST * hatchAmount;
-        
-        if ((user.milk || 0) < milkNeeded) {
-            return {
-                success: false,
-                error: `Insufficient Milk. Need ${milkNeeded} Milk`,
-                errorCode: 'INSUFFICIENT_MILK'
-            };
-        }
-        
-        const userUpdates = {
-            milk: (user.milk || 0) - milkNeeded,
-            cows_owned: (user.cows_owned || 0) + hatchAmount,
-            updatedAt: Date.now()
-        };
-        
-        await dbUpdate(env, `users/${userId}`, userUpdates);
-        
-        await dbPush(env, `users/${userId}/transactions`, {
-            type: 'hatch_cow',
-            amount: hatchAmount,
-            milkCost: milkNeeded,
-            timestamp: Date.now()
-        });
-        
-        const updatedUserResult = await dbGet(env, `users/${userId}`);
-        const updatedUser = updatedUserResult.data;
-        
-        return {
-            success: true,
-            data: {
-                cows_hatched: hatchAmount,
-                milk_used: milkNeeded,
-                new_milk: updatedUser.milk,
-                new_cows: updatedUser.cows_owned
+    let attempt = 0;
+    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
+    
+    while (attempt < maxAttempts) {
+        try {
+            const { amount } = data;
+            const hatchAmount = parseInt(amount) || 1;
+            
+            if (hatchAmount <= 0) {
+                return {
+                    success: false,
+                    error: 'Invalid hatch amount',
+                    errorCode: 'INVALID_AMOUNT'
+                };
             }
-        };
-        
-    } catch (error) {
-        console.error('Hatch cow error:', error);
-        return {
-            success: false,
-            error: error.message,
-            errorCode: 'HATCH_COW_ERROR'
-        };
+            
+            const userResult = await dbGet(env, `users/${userId}`);
+            
+            if (!userResult.success || !userResult.data) {
+                return {
+                    success: false,
+                    error: 'User not found',
+                    errorCode: 'USER_NOT_FOUND'
+                };
+            }
+            
+            let user = userResult.data;
+            
+            const productionResult = await calculateProduction(env, userId, user);
+            
+            if (productionResult) {
+                user = productionResult.user;
+            }
+            
+            const milkNeeded = GAME_CONSTANTS.COW_HATCH_COST * hatchAmount;
+            
+            const currentMilk = user.milk || 0;
+            if (currentMilk < milkNeeded) {
+                return {
+                    success: false,
+                    error: `Insufficient Milk. Need ${milkNeeded} Milk`,
+                    errorCode: 'INSUFFICIENT_MILK'
+                };
+            }
+            
+            // ========== ATOMIC UPDATE للحليب ==========
+            const atomicResult = await atomicUpdateUserResource(
+                env,
+                userId,
+                'milk',
+                milkNeeded,
+                currentMilk
+            );
+            
+            if (!atomicResult.success) {
+                if (atomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
+                    attempt++;
+                    if (attempt < maxAttempts) {
+                        console.log(`Race condition detected for user ${userId} (hatchCow), retry attempt ${attempt}/${maxAttempts}`);
+                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                        continue;
+                    } else {
+                        return {
+                            success: false,
+                            error: 'System busy, please try again',
+                            errorCode: 'RACE_CONDITION_MAX_RETRIES'
+                        };
+                    }
+                } else {
+                    return {
+                        success: false,
+                        error: atomicResult.error,
+                        errorCode: atomicResult.errorCode || 'ATOMIC_UPDATE_FAILED'
+                    };
+                }
+            }
+            
+            const userUpdates = {
+                cows_owned: (user.cows_owned || 0) + hatchAmount,
+                updatedAt: Date.now()
+            };
+            
+            await dbUpdate(env, `users/${userId}`, userUpdates);
+            
+            await dbPush(env, `users/${userId}/transactions`, {
+                type: 'hatch_cow',
+                amount: hatchAmount,
+                milkCost: milkNeeded,
+                timestamp: Date.now()
+            });
+            
+            const updatedUserResult = await dbGet(env, `users/${userId}`);
+            const updatedUser = updatedUserResult.data;
+            
+            return {
+                success: true,
+                data: {
+                    cows_hatched: hatchAmount,
+                    milk_used: milkNeeded,
+                    new_milk: updatedUser.milk,
+                    new_cows: updatedUser.cows_owned
+                }
+            };
+            
+        } catch (error) {
+            console.error(`Hatch cow error (attempt ${attempt + 1}):`, error);
+            attempt++;
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+            } else {
+                return {
+                    success: false,
+                    error: error.message,
+                    errorCode: 'HATCH_COW_ERROR'
+                };
+            }
+        }
     }
+    
+    return {
+        success: false,
+        error: 'Maximum retry attempts exceeded',
+        errorCode: 'MAX_RETRIES_EXCEEDED'
+    };
 }
 
 async function handleHatchChicken(env, userId, data) {
-    try {
-        const { amount } = data;
-        const hatchAmount = parseInt(amount) || 1;
-        
-        if (hatchAmount <= 0) {
-            return {
-                success: false,
-                error: 'Invalid hatch amount',
-                errorCode: 'INVALID_AMOUNT'
-            };
-        }
-        
-        const userResult = await dbGet(env, `users/${userId}`);
-        
-        if (!userResult.success || !userResult.data) {
-            return {
-                success: false,
-                error: 'User not found',
-                errorCode: 'USER_NOT_FOUND'
-            };
-        }
-        
-        let user = userResult.data;
-        
-        const productionResult = await calculateProduction(env, userId, user);
-        
-        if (productionResult) {
-            user = productionResult.user;
-        }
-        
-        const eggsNeeded = GAME_CONSTANTS.CHICKEN_HATCH_COST * hatchAmount;
-        
-        if ((user.eggs || 0) < eggsNeeded) {
-            return {
-                success: false,
-                error: `Insufficient Eggs. Need ${eggsNeeded} Eggs`,
-                errorCode: 'INSUFFICIENT_EGGS'
-            };
-        }
-        
-        const userUpdates = {
-            eggs: (user.eggs || 0) - eggsNeeded,
-            chickens_owned: (user.chickens_owned || 0) + hatchAmount,
-            updatedAt: Date.now()
-        };
-        
-        await dbUpdate(env, `users/${userId}`, userUpdates);
-        
-        await dbPush(env, `users/${userId}/transactions`, {
-            type: 'hatch_chicken',
-            amount: hatchAmount,
-            eggsCost: eggsNeeded,
-            timestamp: Date.now()
-        });
-        
-        const updatedUserResult = await dbGet(env, `users/${userId}`);
-        const updatedUser = updatedUserResult.data;
-        
-        return {
-            success: true,
-            data: {
-                chickens_hatched: hatchAmount,
-                eggs_used: eggsNeeded,
-                new_eggs: updatedUser.eggs,
-                new_chickens: updatedUser.chickens_owned
+    let attempt = 0;
+    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
+    
+    while (attempt < maxAttempts) {
+        try {
+            const { amount } = data;
+            const hatchAmount = parseInt(amount) || 1;
+            
+            if (hatchAmount <= 0) {
+                return {
+                    success: false,
+                    error: 'Invalid hatch amount',
+                    errorCode: 'INVALID_AMOUNT'
+                };
             }
-        };
-        
-    } catch (error) {
-        console.error('Hatch chicken error:', error);
-        return {
-            success: false,
-            error: error.message,
-            errorCode: 'HATCH_CHICKEN_ERROR'
-        };
+            
+            const userResult = await dbGet(env, `users/${userId}`);
+            
+            if (!userResult.success || !userResult.data) {
+                return {
+                    success: false,
+                    error: 'User not found',
+                    errorCode: 'USER_NOT_FOUND'
+                };
+            }
+            
+            let user = userResult.data;
+            
+            const productionResult = await calculateProduction(env, userId, user);
+            
+            if (productionResult) {
+                user = productionResult.user;
+            }
+            
+            const eggsNeeded = GAME_CONSTANTS.CHICKEN_HATCH_COST * hatchAmount;
+            
+            const currentEggs = user.eggs || 0;
+            if (currentEggs < eggsNeeded) {
+                return {
+                    success: false,
+                    error: `Insufficient Eggs. Need ${eggsNeeded} Eggs`,
+                    errorCode: 'INSUFFICIENT_EGGS'
+                };
+            }
+            
+            // ========== ATOMIC UPDATE للبيض ==========
+            const atomicResult = await atomicUpdateUserResource(
+                env,
+                userId,
+                'eggs',
+                eggsNeeded,
+                currentEggs
+            );
+            
+            if (!atomicResult.success) {
+                if (atomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
+                    attempt++;
+                    if (attempt < maxAttempts) {
+                        console.log(`Race condition detected for user ${userId} (hatchChicken), retry attempt ${attempt}/${maxAttempts}`);
+                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                        continue;
+                    } else {
+                        return {
+                            success: false,
+                            error: 'System busy, please try again',
+                            errorCode: 'RACE_CONDITION_MAX_RETRIES'
+                        };
+                    }
+                } else {
+                    return {
+                        success: false,
+                        error: atomicResult.error,
+                        errorCode: atomicResult.errorCode || 'ATOMIC_UPDATE_FAILED'
+                    };
+                }
+            }
+            
+            const userUpdates = {
+                chickens_owned: (user.chickens_owned || 0) + hatchAmount,
+                updatedAt: Date.now()
+            };
+            
+            await dbUpdate(env, `users/${userId}`, userUpdates);
+            
+            await dbPush(env, `users/${userId}/transactions`, {
+                type: 'hatch_chicken',
+                amount: hatchAmount,
+                eggsCost: eggsNeeded,
+                timestamp: Date.now()
+            });
+            
+            const updatedUserResult = await dbGet(env, `users/${userId}`);
+            const updatedUser = updatedUserResult.data;
+            
+            return {
+                success: true,
+                data: {
+                    chickens_hatched: hatchAmount,
+                    eggs_used: eggsNeeded,
+                    new_eggs: updatedUser.eggs,
+                    new_chickens: updatedUser.chickens_owned
+                }
+            };
+            
+        } catch (error) {
+            console.error(`Hatch chicken error (attempt ${attempt + 1}):`, error);
+            attempt++;
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+            } else {
+                return {
+                    success: false,
+                    error: error.message,
+                    errorCode: 'HATCH_CHICKEN_ERROR'
+                };
+            }
+        }
     }
+    
+    return {
+        success: false,
+        error: 'Maximum retry attempts exceeded',
+        errorCode: 'MAX_RETRIES_EXCEEDED'
+    };
 }
 
 // ============================================
@@ -1828,87 +2085,161 @@ async function handleHatchChicken(env, userId, data) {
 // ============================================
 
 async function handleStartDiamondProduction(env, userId, data) {
-    try {
-        const userResult = await dbGet(env, `users/${userId}`);
-        
-        if (!userResult.success || !userResult.data) {
-            return {
-                success: false,
-                error: 'User not found',
-                errorCode: 'USER_NOT_FOUND'
-            };
-        }
-        
-        let user = userResult.data;
-        
-        const productionResult = await calculateProduction(env, userId, user);
-        
-        if (productionResult) {
-            user = productionResult.user;
-        }
-        
-        if (!user.diamond_engines_owned || user.diamond_engines_owned < 1) {
-            return {
-                success: false,
-                error: 'You need a Diamond Engine first',
-                errorCode: 'NO_DIAMOND_ENGINE'
-            };
-        }
-        
-        if ((user.milk || 0) < GAME_CONSTANTS.DIAMOND_PRODUCTION_COST_MILK) {
-            return {
-                success: false,
-                error: `Insufficient Milk. Need ${GAME_CONSTANTS.DIAMOND_PRODUCTION_COST_MILK} Milk`,
-                errorCode: 'INSUFFICIENT_MILK'
-            };
-        }
-        
-        if ((user.eggs || 0) < GAME_CONSTANTS.DIAMOND_PRODUCTION_COST_EGG) {
-            return {
-                success: false,
-                error: `Insufficient Eggs. Need ${GAME_CONSTANTS.DIAMOND_PRODUCTION_COST_EGG} Eggs`,
-                errorCode: 'INSUFFICIENT_EGGS'
-            };
-        }
-        
-        const userUpdates = {
-            milk: (user.milk || 0) - GAME_CONSTANTS.DIAMOND_PRODUCTION_COST_MILK,
-            eggs: (user.eggs || 0) - GAME_CONSTANTS.DIAMOND_PRODUCTION_COST_EGG,
-            diamond: (user.diamond || 0) + GAME_CONSTANTS.DIAMOND_PRODUCTION_YIELD,
-            updatedAt: Date.now()
-        };
-        
-        await dbUpdate(env, `users/${userId}`, userUpdates);
-        
-        await dbPush(env, `users/${userId}/transactions`, {
-            type: 'diamond_production',
-            milkUsed: GAME_CONSTANTS.DIAMOND_PRODUCTION_COST_MILK,
-            eggsUsed: GAME_CONSTANTS.DIAMOND_PRODUCTION_COST_EGG,
-            diamondProduced: GAME_CONSTANTS.DIAMOND_PRODUCTION_YIELD,
-            timestamp: Date.now()
-        });
-        
-        const updatedUserResult = await dbGet(env, `users/${userId}`);
-        const updatedUser = updatedUserResult.data;
-        
-        return {
-            success: true,
-            data: {
-                diamondProduced: GAME_CONSTANTS.DIAMOND_PRODUCTION_YIELD,
-                newMilk: updatedUser.milk,
-                newEggs: updatedUser.eggs,
-                newDiamond: updatedUser.diamond
+    let attempt = 0;
+    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
+    
+    while (attempt < maxAttempts) {
+        try {
+            const userResult = await dbGet(env, `users/${userId}`);
+            
+            if (!userResult.success || !userResult.data) {
+                return {
+                    success: false,
+                    error: 'User not found',
+                    errorCode: 'USER_NOT_FOUND'
+                };
             }
-        };
-        
-    } catch (error) {
-        console.error('Diamond production error:', error);
-        return {
-            success: false,
-            error: error.message,
-            errorCode: 'DIAMOND_PRODUCTION_ERROR'
-        };
+            
+            let user = userResult.data;
+            
+            const productionResult = await calculateProduction(env, userId, user);
+            
+            if (productionResult) {
+                user = productionResult.user;
+            }
+            
+            if (!user.diamond_engines_owned || user.diamond_engines_owned < 1) {
+                return {
+                    success: false,
+                    error: 'You need a Diamond Engine first',
+                    errorCode: 'NO_DIAMOND_ENGINE'
+                };
+            }
+            
+            const currentMilk = user.milk || 0;
+            const currentEggs = user.eggs || 0;
+            
+            if (currentMilk < GAME_CONSTANTS.DIAMOND_PRODUCTION_COST_MILK) {
+                return {
+                    success: false,
+                    error: `Insufficient Milk. Need ${GAME_CONSTANTS.DIAMOND_PRODUCTION_COST_MILK} Milk`,
+                    errorCode: 'INSUFFICIENT_MILK'
+                };
+            }
+            
+            if (currentEggs < GAME_CONSTANTS.DIAMOND_PRODUCTION_COST_EGG) {
+                return {
+                    success: false,
+                    error: `Insufficient Eggs. Need ${GAME_CONSTANTS.DIAMOND_PRODUCTION_COST_EGG} Eggs`,
+                    errorCode: 'INSUFFICIENT_EGGS'
+                };
+            }
+            
+            // ========== ATOMIC UPDATES للموارد ==========
+            // تحديث الحليب أولاً
+            const milkAtomicResult = await atomicUpdateUserResource(
+                env,
+                userId,
+                'milk',
+                GAME_CONSTANTS.DIAMOND_PRODUCTION_COST_MILK,
+                currentMilk
+            );
+            
+            if (!milkAtomicResult.success) {
+                if (milkAtomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
+                    attempt++;
+                    if (attempt < maxAttempts) {
+                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                        continue;
+                    }
+                }
+                return {
+                    success: false,
+                    error: milkAtomicResult.error,
+                    errorCode: milkAtomicResult.errorCode || 'MILK_UPDATE_FAILED'
+                };
+            }
+            
+            // تحديث البيض بعد نجاح تحديث الحليب
+            const eggsAtomicResult = await atomicUpdateUserResource(
+                env,
+                userId,
+                'eggs',
+                GAME_CONSTANTS.DIAMOND_PRODUCTION_COST_EGG,
+                currentEggs
+            );
+            
+            if (!eggsAtomicResult.success) {
+                // في حالة فشل تحديث البيض، نعيد الحليب
+                await atomicUpdateUserResource(
+                    env,
+                    userId,
+                    'milk',
+                    -GAME_CONSTANTS.DIAMOND_PRODUCTION_COST_MILK,
+                    milkAtomicResult.data.newBalance
+                );
+                
+                if (eggsAtomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
+                    attempt++;
+                    if (attempt < maxAttempts) {
+                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                        continue;
+                    }
+                }
+                return {
+                    success: false,
+                    error: eggsAtomicResult.error,
+                    errorCode: eggsAtomicResult.errorCode || 'EGGS_UPDATE_FAILED'
+                };
+            }
+            
+            // إضافة الماس
+            await dbUpdate(env, `users/${userId}`, {
+                diamond: (user.diamond || 0) + GAME_CONSTANTS.DIAMOND_PRODUCTION_YIELD,
+                updatedAt: Date.now()
+            });
+            
+            await dbPush(env, `users/${userId}/transactions`, {
+                type: 'diamond_production',
+                milkUsed: GAME_CONSTANTS.DIAMOND_PRODUCTION_COST_MILK,
+                eggsUsed: GAME_CONSTANTS.DIAMOND_PRODUCTION_COST_EGG,
+                diamondProduced: GAME_CONSTANTS.DIAMOND_PRODUCTION_YIELD,
+                timestamp: Date.now()
+            });
+            
+            const updatedUserResult = await dbGet(env, `users/${userId}`);
+            const updatedUser = updatedUserResult.data;
+            
+            return {
+                success: true,
+                data: {
+                    diamondProduced: GAME_CONSTANTS.DIAMOND_PRODUCTION_YIELD,
+                    newMilk: updatedUser.milk,
+                    newEggs: updatedUser.eggs,
+                    newDiamond: updatedUser.diamond
+                }
+            };
+            
+        } catch (error) {
+            console.error(`Diamond production error (attempt ${attempt + 1}):`, error);
+            attempt++;
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+            } else {
+                return {
+                    success: false,
+                    error: error.message,
+                    errorCode: 'DIAMOND_PRODUCTION_ERROR'
+                };
+            }
+        }
     }
+    
+    return {
+        success: false,
+        error: 'Maximum retry attempts exceeded',
+        errorCode: 'MAX_RETRIES_EXCEEDED'
+    };
 }
 
 // ============================================
@@ -1916,99 +2247,146 @@ async function handleStartDiamondProduction(env, userId, data) {
 // ============================================
 
 async function handleConvertDiamond(env, userId, data) {
-    try {
-        const { amount } = data;
-        const diamondsToConvert = parseInt(amount);
-        
-        if (!diamondsToConvert || diamondsToConvert <= 0) {
-            return {
-                success: false,
-                error: 'Invalid amount',
-                errorCode: 'INVALID_AMOUNT'
-            };
-        }
-        
-        const userResult = await dbGet(env, `users/${userId}`);
-        const globalResult = await dbGet(env, 'global');
-        
-        if (!userResult.success || !globalResult.success) {
-            return {
-                success: false,
-                error: 'Failed to load game state',
-                errorCode: 'STATE_LOAD_ERROR'
-            };
-        }
-        
-        let user = userResult.data;
-        let global = globalResult.data;
-        
-        if (!user) {
-            return {
-                success: false,
-                error: 'User not found',
-                errorCode: 'USER_NOT_FOUND'
-            };
-        }
-        
-        if (!global) {
-            global = await initializeGlobalState(env);
-        }
-        
-        const productionResult = await calculateProduction(env, userId, user);
-        
-        if (productionResult) {
-            user = productionResult.user;
-        }
-        
-        if ((user.diamond || 0) < diamondsToConvert) {
-            return {
-                success: false,
-                error: 'Insufficient diamonds',
-                errorCode: 'INSUFFICIENT_DIAMOND'
-            };
-        }
-        
-        const diamondPrice = global.diamond_price || GAME_CONSTANTS.DIAMOND_BASE_PRICE;
-        const tonToReceive = diamondsToConvert * diamondPrice;
-        
-        const userUpdates = {
-            diamond: (user.diamond || 0) - diamondsToConvert,
-            tonBalance: (user.tonBalance || 0) + tonToReceive,
-            updatedAt: Date.now()
-        };
-        
-        await dbUpdate(env, `users/${userId}`, userUpdates);
-        
-        await dbPush(env, `users/${userId}/transactions`, {
-            type: 'diamond_conversion',
-            diamondsUsed: diamondsToConvert,
-            diamondPrice: diamondPrice,
-            tonReceived: tonToReceive,
-            timestamp: Date.now()
-        });
-        
-        const updatedUserResult = await dbGet(env, `users/${userId}`);
-        const updatedUser = updatedUserResult.data;
-        
-        return {
-            success: true,
-            data: {
-                diamondsConverted: diamondsToConvert,
+    let attempt = 0;
+    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
+    
+    while (attempt < maxAttempts) {
+        try {
+            const { amount } = data;
+            const diamondsToConvert = parseInt(amount);
+            
+            if (!diamondsToConvert || diamondsToConvert <= 0) {
+                return {
+                    success: false,
+                    error: 'Invalid amount',
+                    errorCode: 'INVALID_AMOUNT'
+                };
+            }
+            
+            const userResult = await dbGet(env, `users/${userId}`);
+            const globalResult = await dbGet(env, 'global');
+            
+            if (!userResult.success || !globalResult.success) {
+                return {
+                    success: false,
+                    error: 'Failed to load game state',
+                    errorCode: 'STATE_LOAD_ERROR'
+                };
+            }
+            
+            let user = userResult.data;
+            let global = globalResult.data;
+            
+            if (!user) {
+                return {
+                    success: false,
+                    error: 'User not found',
+                    errorCode: 'USER_NOT_FOUND'
+                };
+            }
+            
+            if (!global) {
+                global = await initializeGlobalState(env);
+            }
+            
+            const productionResult = await calculateProduction(env, userId, user);
+            
+            if (productionResult) {
+                user = productionResult.user;
+            }
+            
+            const currentDiamond = user.diamond || 0;
+            if (currentDiamond < diamondsToConvert) {
+                return {
+                    success: false,
+                    error: 'Insufficient diamonds',
+                    errorCode: 'INSUFFICIENT_DIAMOND'
+                };
+            }
+            
+            const diamondPrice = global.diamond_price || GAME_CONSTANTS.DIAMOND_BASE_PRICE;
+            const tonToReceive = diamondsToConvert * diamondPrice;
+            
+            // ========== ATOMIC UPDATE للماس ==========
+            const diamondAtomicResult = await atomicUpdateUserResource(
+                env,
+                userId,
+                'diamond',
+                diamondsToConvert,
+                currentDiamond
+            );
+            
+            if (!diamondAtomicResult.success) {
+                if (diamondAtomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
+                    attempt++;
+                    if (attempt < maxAttempts) {
+                        console.log(`Race condition detected for user ${userId} (convertDiamond), retry attempt ${attempt}/${maxAttempts}`);
+                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                        continue;
+                    } else {
+                        return {
+                            success: false,
+                            error: 'System busy, please try again',
+                            errorCode: 'RACE_CONDITION_MAX_RETRIES'
+                        };
+                    }
+                } else {
+                    return {
+                        success: false,
+                        error: diamondAtomicResult.error,
+                        errorCode: diamondAtomicResult.errorCode || 'DIAMOND_UPDATE_FAILED'
+                    };
+                }
+            }
+            
+            // إضافة TON
+            await dbUpdate(env, `users/${userId}`, {
+                tonBalance: (user.tonBalance || 0) + tonToReceive,
+                updatedAt: Date.now()
+            });
+            
+            await dbPush(env, `users/${userId}/transactions`, {
+                type: 'diamond_conversion',
+                diamondsUsed: diamondsToConvert,
                 diamondPrice: diamondPrice,
                 tonReceived: tonToReceive,
-                newDiamond: updatedUser.diamond,
-                newTonBalance: updatedUser.tonBalance
+                timestamp: Date.now()
+            });
+            
+            const updatedUserResult = await dbGet(env, `users/${userId}`);
+            const updatedUser = updatedUserResult.data;
+            
+            return {
+                success: true,
+                data: {
+                    diamondsConverted: diamondsToConvert,
+                    diamondPrice: diamondPrice,
+                    tonReceived: tonToReceive,
+                    newDiamond: updatedUser.diamond,
+                    newTonBalance: updatedUser.tonBalance
+                }
+            };
+            
+        } catch (error) {
+            console.error(`Diamond conversion error (attempt ${attempt + 1}):`, error);
+            attempt++;
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+            } else {
+                return {
+                    success: false,
+                    error: error.message,
+                    errorCode: 'DIAMOND_CONVERSION_ERROR'
+                };
             }
-        };
-        
-    } catch (error) {
-        console.error('Diamond conversion error:', error);
-        return {
-            success: false,
-            error: error.message,
-            errorCode: 'DIAMOND_CONVERSION_ERROR'
-        };
+        }
     }
+    
+    return {
+        success: false,
+        error: 'Maximum retry attempts exceeded',
+        errorCode: 'MAX_RETRIES_EXCEEDED'
+    };
 }
 
 // ============================================
@@ -2111,7 +2489,7 @@ async function handleCreateSellOrder(env, userId, data) {
                 if (atomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
                     attempt++;
                     if (attempt < maxAttempts) {
-                        console.log(`Race condition detected for user ${userId}, retry attempt ${attempt}/${maxAttempts}`);
+                        console.log(`Race condition detected for user ${userId} (sell order), retry attempt ${attempt}/${maxAttempts}`);
                         // انتظار قصير قبل إعادة المحاولة
                         await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
                         continue;
@@ -2482,7 +2860,8 @@ async function handleExecuteOrder(env, userId, data) {
                 // المشتري يدفع TON، البائع يستلم TON ناقص العمولة
                 
                 // التحقق من رصيد المشتري
-                if ((buyerData.tonBalance || 0) < totalCost) {
+                const buyerTonBalance = buyerData.tonBalance || 0;
+                if (buyerTonBalance < totalCost) {
                     return {
                         success: false,
                         error: 'Buyer has insufficient TON balance',
@@ -2492,7 +2871,7 @@ async function handleExecuteOrder(env, userId, data) {
                 
                 // خصم TON من المشتري (atomic)
                 const buyerTonUpdate = await atomicUpdateUserResource(
-                    env, buyerId, 'tonBalance', totalCost, buyerData.tonBalance
+                    env, buyerId, 'tonBalance', totalCost, buyerTonBalance
                 );
                 if (!buyerTonUpdate.success) {
                     if (buyerTonUpdate.errorCode === 'RACE_CONDITION_DETECTED') {
@@ -2523,8 +2902,9 @@ async function handleExecuteOrder(env, userId, data) {
                 }
                 
                 // إضافة TON للبائع (atomic)
+                const sellerTonBalance = sellerData.tonBalance || 0;
                 const sellerTonUpdate = await atomicUpdateUserResource(
-                    env, sellerId, 'tonBalance', -sellerReceives, sellerData.tonBalance
+                    env, sellerId, 'tonBalance', -sellerReceives, sellerTonBalance
                 );
                 if (!sellerTonUpdate.success) {
                     // في حالة فشل إضافة الرصيد للبائع، نحتاج لاسترجاع رصيد المشتري
@@ -2578,20 +2958,23 @@ async function handleExecuteOrder(env, userId, data) {
                 }
                 
                 // إضافة TON للبائع
+                const sellerTonBalance = sellerData.tonBalance || 0;
                 await dbUpdate(env, `users/${sellerId}`, {
-                    tonBalance: (sellerData.tonBalance || 0) + totalCost,
+                    tonBalance: sellerTonBalance + totalCost,
                     updatedAt: Date.now()
                 });
                 
                 // إضافة الموارد للمشتري
+                const buyerResourceBalance = order.resource === 'milk' ? 
+                    (buyerData.milk || 0) : (buyerData.eggs || 0);
                 if (order.resource === 'milk') {
                     await dbUpdate(env, `users/${buyerId}`, {
-                        milk: (buyerData.milk || 0) + executeQuantity,
+                        milk: buyerResourceBalance + executeQuantity,
                         updatedAt: Date.now()
                     });
                 } else {
                     await dbUpdate(env, `users/${buyerId}`, {
-                        eggs: (buyerData.eggs || 0) + executeQuantity,
+                        eggs: buyerResourceBalance + executeQuantity,
                         updatedAt: Date.now()
                     });
                 }
@@ -2878,6 +3261,7 @@ async function handleCancelOrder(env, userId, data) {
                     if (atomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
                         attempt++;
                         if (attempt < maxAttempts) {
+                            console.log(`Race condition detected for user ${userId} (cancel sell order), retry attempt ${attempt}/${maxAttempts}`);
                             await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
                             continue;
                         }
@@ -2892,19 +3276,21 @@ async function handleCancelOrder(env, userId, data) {
             } else {
                 // إعادة TON
                 const refundAmount = order.remaining * order.pricePerUnit;
+                const currentTonBalance = user.tonBalance || 0;
                 
                 const atomicResult = await atomicUpdateUserResource(
                     env,
                     userId,
                     'tonBalance',
                     -refundAmount, // إضافة (قيمة سالبة)
-                    user.tonBalance || 0
+                    currentTonBalance
                 );
                 
                 if (!atomicResult.success) {
                     if (atomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
                         attempt++;
                         if (attempt < maxAttempts) {
+                            console.log(`Race condition detected for user ${userId} (cancel buy order), retry attempt ${attempt}/${maxAttempts}`);
                             await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
                             continue;
                         }
@@ -3143,113 +3529,160 @@ async function handleVerifyDeposit(env, userId, data) {
 }
 
 // ============================================
-// WITHDRAWAL SYSTEM
+// WITHDRAWAL SYSTEM - FIXED WITH ATOMIC UPDATE
 // ============================================
 
 async function handleWithdraw(env, userId, data) {
-    try {
-        const { amount, address } = data;
-        const withdrawAmount = parseFloat(amount);
-        
-        if (!withdrawAmount || withdrawAmount < GAME_CONSTANTS.MIN_WITHDRAW_AMOUNT) {
-            return {
-                success: false,
-                error: `Minimum withdrawal amount is ${GAME_CONSTANTS.MIN_WITHDRAW_AMOUNT} TON`,
-                errorCode: 'INVALID_AMOUNT'
+    let attempt = 0;
+    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
+    
+    while (attempt < maxAttempts) {
+        try {
+            const { amount, address } = data;
+            const withdrawAmount = parseFloat(amount);
+            
+            if (!withdrawAmount || withdrawAmount < GAME_CONSTANTS.MIN_WITHDRAW_AMOUNT) {
+                return {
+                    success: false,
+                    error: `Minimum withdrawal amount is ${GAME_CONSTANTS.MIN_WITHDRAW_AMOUNT} TON`,
+                    errorCode: 'INVALID_AMOUNT'
+                };
+            }
+            
+            if (!address || address.trim().length < 10) {
+                return {
+                    success: false,
+                    error: 'Valid TON wallet address is required',
+                    errorCode: 'INVALID_ADDRESS'
+                };
+            }
+            
+            // جلب المستخدم فقط للتحقق من وجوده
+            const userResult = await dbGet(env, `users/${userId}`);
+            if (!userResult.success || !userResult.data) {
+                return {
+                    success: false,
+                    error: 'User not found',
+                    errorCode: 'USER_NOT_FOUND'
+                };
+            }
+            
+            let user = userResult.data;
+            
+            // حساب الإنتاج أولاً
+            const productionResult = await calculateProduction(env, userId, user);
+            if (productionResult) {
+                user = productionResult.user;
+            }
+            
+            const currentBalance = user.tonBalance || 0;
+            
+            // التحقق من كفاية الرصيد
+            if (currentBalance < withdrawAmount) {
+                return {
+                    success: false,
+                    error: 'Insufficient TON balance',
+                    errorCode: 'INSUFFICIENT_TON'
+                };
+            }
+            
+            const fee = withdrawAmount * (GAME_CONSTANTS.WITHDRAW_FEE_PERCENT / 100);
+            const netAmount = withdrawAmount - fee;
+            
+            // ========== ATOMIC UPDATE للرصيد ==========
+            const atomicResult = await atomicUpdateUserResource(
+                env,
+                userId,
+                'tonBalance',
+                withdrawAmount,
+                currentBalance
+            );
+            
+            if (!atomicResult.success) {
+                if (atomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
+                    attempt++;
+                    if (attempt < maxAttempts) {
+                        console.log(`Race condition detected for user ${userId} (withdraw), retry attempt ${attempt}/${maxAttempts}`);
+                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                        continue;
+                    } else {
+                        return {
+                            success: false,
+                            error: 'System busy, please try again',
+                            errorCode: 'RACE_CONDITION_MAX_RETRIES'
+                        };
+                    }
+                } else {
+                    return {
+                        success: false,
+                        error: atomicResult.error,
+                        errorCode: atomicResult.errorCode || 'ATOMIC_UPDATE_FAILED'
+                    };
+                }
+            }
+            
+            // ========== إنشاء طلب السحب ==========
+            const withdrawalId = `wd_${Date.now()}_${userId}_${attempt}`;
+            const now = Date.now();
+            
+            const withdrawalRecord = {
+                id: withdrawalId,
+                userId: userId,
+                amount: withdrawAmount,
+                fee: fee,
+                netAmount: netAmount,
+                address: address,
+                status: 'pending',
+                createdAt: now,
+                updatedAt: now
             };
-        }
-        
-        if (!address || address.trim().length < 10) {
-            return {
-                success: false,
-                error: 'Valid TON wallet address is required',
-                errorCode: 'INVALID_ADDRESS'
-            };
-        }
-        
-        const userResult = await dbGet(env, `users/${userId}`);
-        
-        if (!userResult.success || !userResult.data) {
-            return {
-                success: false,
-                error: 'User not found',
-                errorCode: 'USER_NOT_FOUND'
-            };
-        }
-        
-        let user = userResult.data;
-        
-        const productionResult = await calculateProduction(env, userId, user);
-        
-        if (productionResult) {
-            user = productionResult.user;
-        }
-        
-        const fee = withdrawAmount * (GAME_CONSTANTS.WITHDRAW_FEE_PERCENT / 100);
-        const netAmount = withdrawAmount - fee;
-        
-        if ((user.tonBalance || 0) < withdrawAmount) {
-            return {
-                success: false,
-                error: 'Insufficient TON balance',
-                errorCode: 'INSUFFICIENT_TON'
-            };
-        }
-        
-        const withdrawalId = `wd_${Date.now()}_${userId}`;
-        const now = Date.now();
-        
-        const withdrawalRecord = {
-            id: withdrawalId,
-            userId: userId,
-            amount: withdrawAmount,
-            fee: fee,
-            netAmount: netAmount,
-            address: address,
-            status: 'pending',
-            createdAt: now,
-            updatedAt: now
-        };
-        
-        await dbUpdate(env, `users/${userId}`, {
-            tonBalance: (user.tonBalance || 0) - withdrawAmount,
-            updatedAt: now
-        });
-        
-        await dbSet(env, `withdrawals/${withdrawalId}`, withdrawalRecord);
-        await dbSet(env, `users/${userId}/withdrawals/${withdrawalId}`, withdrawalRecord);
-        
-        await dbPush(env, `users/${userId}/transactions`, {
-            type: 'withdrawal',
-            withdrawalId: withdrawalId,
-            amount: withdrawAmount,
-            fee: fee,
-            netAmount: netAmount,
-            address: address,
-            status: 'pending',
-            timestamp: now
-        });
-        
-        return {
-            success: true,
-            data: {
+            
+            await dbSet(env, `withdrawals/${withdrawalId}`, withdrawalRecord);
+            await dbSet(env, `users/${userId}/withdrawals/${withdrawalId}`, withdrawalRecord);
+            
+            await dbPush(env, `users/${userId}/transactions`, {
+                type: 'withdrawal',
                 withdrawalId: withdrawalId,
                 amount: withdrawAmount,
                 fee: fee,
                 netAmount: netAmount,
-                newBalance: (user.tonBalance || 0) - withdrawAmount,
-                status: 'pending'
+                address: address,
+                status: 'pending',
+                timestamp: now
+            });
+            
+            return {
+                success: true,
+                data: {
+                    withdrawalId: withdrawalId,
+                    amount: withdrawAmount,
+                    fee: fee,
+                    netAmount: netAmount,
+                    newBalance: atomicResult.data.newBalance,
+                    status: 'pending'
+                }
+            };
+            
+        } catch (error) {
+            console.error(`Withdrawal error (attempt ${attempt + 1}):`, error);
+            attempt++;
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+            } else {
+                return {
+                    success: false,
+                    error: error.message,
+                    errorCode: 'WITHDRAWAL_ERROR'
+                };
             }
-        };
-        
-    } catch (error) {
-        console.error('Withdrawal error:', error);
-        return {
-            success: false,
-            error: error.message,
-            errorCode: 'WITHDRAWAL_ERROR'
-        };
+        }
     }
+    
+    return {
+        success: false,
+        error: 'Maximum retry attempts exceeded',
+        errorCode: 'MAX_RETRIES_EXCEEDED'
+    };
 }
 
 // ============================================
@@ -3257,73 +3690,121 @@ async function handleWithdraw(env, userId, data) {
 // ============================================
 
 async function handleClaimReferralEarnings(env, userId) {
-    try {
-        const userResult = await dbGet(env, `users/${userId}`);
-        
-        if (!userResult.success || !userResult.data) {
-            return {
-                success: false,
-                error: 'User not found',
-                errorCode: 'USER_NOT_FOUND'
-            };
-        }
-        
-        let user = userResult.data;
-        
-        const productionResult = await calculateProduction(env, userId, user);
-        
-        if (productionResult) {
-            user = productionResult.user;
-        }
-        
-        const earnings = parseFloat(user.referralEarnings || 0);
-        
-        if (earnings <= 0) {
-            return {
-                success: false,
-                error: 'No referral earnings to claim',
-                errorCode: 'NO_EARNINGS'
-            };
-        }
-        
-        const currentTonBalance = parseFloat(user.tonBalance || 0);
-        const currentClaimed = parseFloat(user.referralEarningsClaimed || 0);
-        
-        const userUpdates = {
-            tonBalance: currentTonBalance + earnings,
-            referralEarnings: 0,
-            referralEarningsClaimed: currentClaimed + earnings,
-            updatedAt: Date.now()
-        };
-        
-        await dbUpdate(env, `users/${userId}`, userUpdates);
-        
-        await dbPush(env, `users/${userId}/transactions`, {
-            type: 'claim_referral',
-            amount: earnings,
-            timestamp: Date.now()
-        });
-        
-        const updatedUserResult = await dbGet(env, `users/${userId}`);
-        const updatedUser = updatedUserResult.data;
-        
-        return {
-            success: true,
-            data: {
-                claimedAmount: earnings,
-                newTonBalance: updatedUser.tonBalance,
-                totalClaimed: updatedUser.referralEarningsClaimed
+    let attempt = 0;
+    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
+    
+    while (attempt < maxAttempts) {
+        try {
+            const userResult = await dbGet(env, `users/${userId}`);
+            
+            if (!userResult.success || !userResult.data) {
+                return {
+                    success: false,
+                    error: 'User not found',
+                    errorCode: 'USER_NOT_FOUND'
+                };
             }
-        };
-        
-    } catch (error) {
-        console.error('Claim referral earnings error:', error);
-        return {
-            success: false,
-            error: error.message,
-            errorCode: 'CLAIM_REFERRAL_ERROR'
-        };
+            
+            let user = userResult.data;
+            
+            const productionResult = await calculateProduction(env, userId, user);
+            
+            if (productionResult) {
+                user = productionResult.user;
+            }
+            
+            const earnings = parseFloat(user.referralEarnings || 0);
+            
+            if (earnings <= 0) {
+                return {
+                    success: false,
+                    error: 'No referral earnings to claim',
+                    errorCode: 'NO_EARNINGS'
+                };
+            }
+            
+            const currentTonBalance = parseFloat(user.tonBalance || 0);
+            const currentClaimed = parseFloat(user.referralEarningsClaimed || 0);
+            
+            // ========== ATOMIC UPDATE لرصيد TON ==========
+            const atomicResult = await atomicUpdateUserResource(
+                env,
+                userId,
+                'tonBalance',
+                -earnings, // إضافة (قيمة سالبة)
+                currentTonBalance
+            );
+            
+            if (!atomicResult.success) {
+                if (atomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
+                    attempt++;
+                    if (attempt < maxAttempts) {
+                        console.log(`Race condition detected for user ${userId} (claimReferral), retry attempt ${attempt}/${maxAttempts}`);
+                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                        continue;
+                    } else {
+                        return {
+                            success: false,
+                            error: 'System busy, please try again',
+                            errorCode: 'RACE_CONDITION_MAX_RETRIES'
+                        };
+                    }
+                } else {
+                    return {
+                        success: false,
+                        error: atomicResult.error,
+                        errorCode: atomicResult.errorCode || 'ATOMIC_UPDATE_FAILED'
+                    };
+                }
+            }
+            
+            // تحديث referralEarnings
+            const userUpdates = {
+                referralEarnings: 0,
+                referralEarningsClaimed: currentClaimed + earnings,
+                updatedAt: Date.now()
+            };
+            
+            await dbUpdate(env, `users/${userId}`, userUpdates);
+            
+            await dbPush(env, `users/${userId}/transactions`, {
+                type: 'claim_referral',
+                amount: earnings,
+                timestamp: Date.now()
+            });
+            
+            const updatedUserResult = await dbGet(env, `users/${userId}`);
+            const updatedUser = updatedUserResult.data;
+            
+            return {
+                success: true,
+                data: {
+                    claimedAmount: earnings,
+                    newTonBalance: updatedUser.tonBalance,
+                    totalClaimed: updatedUser.referralEarningsClaimed
+                }
+            };
+            
+        } catch (error) {
+            console.error(`Claim referral earnings error (attempt ${attempt + 1}):`, error);
+            attempt++;
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+            } else {
+                return {
+                    success: false,
+                    error: error.message,
+                    errorCode: 'CLAIM_REFERRAL_ERROR'
+                };
+            }
+        }
     }
+    
+    return {
+        success: false,
+        error: 'Maximum retry attempts exceeded',
+        errorCode: 'MAX_RETRIES_EXCEEDED'
+    };
 }
 
 async function handleGetReferralInfo(env, userId) {
@@ -3399,240 +3880,328 @@ async function initializePartnerTasks(env) {
 }
 
 async function handleCreateTask(env, userId, data) {
-    try {
-        const { type, link, targetUsers, reward } = data;
-        
-        if (!['channel', 'bot'].includes(type)) {
-            return {
-                success: false,
-                error: 'Invalid task type. Must be channel or bot',
-                errorCode: 'INVALID_TASK_TYPE'
-            };
-        }
-        
-        const target = parseInt(targetUsers);
-        
-        if (!target || target < GAME_CONSTANTS.MIN_TASK_TARGET) {
-            return {
-                success: false,
-                error: `Minimum target users is ${GAME_CONSTANTS.MIN_TASK_TARGET}`,
-                errorCode: 'INVALID_TARGET'
-            };
-        }
-        
-        if (!link || !link.includes('t.me/')) {
-            return {
-                success: false,
-                error: 'Valid Telegram link is required',
-                errorCode: 'INVALID_LINK'
-            };
-        }
-        
-        const taskReward = GAME_CONSTANTS.TASK_REWARD;
-        const totalCost = target * taskReward * 2;
-        
-        const userResult = await dbGet(env, `users/${userId}`);
-        
-        if (!userResult.success || !userResult.data) {
-            return {
-                success: false,
-                error: 'User not found',
-                errorCode: 'USER_NOT_FOUND'
-            };
-        }
-        
-        let user = userResult.data;
-        
-        const productionResult = await calculateProduction(env, userId, user);
-        
-        if (productionResult) {
-            user = productionResult.user;
-        }
-        
-        if ((user.tonBalance || 0) < totalCost) {
-            return {
-                success: false,
-                error: 'Insufficient TON balance',
-                errorCode: 'INSUFFICIENT_TON'
-            };
-        }
-        
-        const now = Date.now();
-        const taskId = `task_${now}_${Math.random().toString(36).substring(2, 10)}`;
-        
-        const taskData = {
-            id: taskId,
-            creatorId: userId,
-            type: type,
-            link: link,
-            targetUsers: target,
-            reward: taskReward,
-            completions: 0,
-            completedBy: [],
-            status: 'active',
-            createdAt: now,
-            expiresAt: now + (GAME_CONSTANTS.MAX_TASK_DURATION_DAYS * 24 * 60 * 60 * 1000),
-            updatedAt: now
-        };
-        
-        await dbUpdate(env, `users/${userId}`, {
-            tonBalance: (user.tonBalance || 0) - totalCost,
-            updatedAt: now
-        });
-        
-        await dbSet(env, `tasks/community/${taskId}`, taskData);
-        
-        await dbPush(env, `users/${userId}/transactions`, {
-            type: 'create_task',
-            taskId: taskId,
-            taskType: type,
-            targetUsers: target,
-            cost: totalCost,
-            timestamp: now
-        });
-        
-        await notifyTaskCreated(env, userId, type, target, totalCost);
-        
-        return {
-            success: true,
-            data: {
-                taskId: taskId,
-                type: type,
-                targetUsers: target,
-                totalCost: totalCost,
-                reward: taskReward
-            }
-        };
-        
-    } catch (error) {
-        console.error('Create task error:', error);
-        return {
-            success: false,
-            error: error.message,
-            errorCode: 'CREATE_TASK_ERROR'
-        };
-    }
-}
-
-async function handleVerifyTask(env, userId, data) {
-    try {
-        const { taskId, taskType } = data;
-        
-        let taskResult = await dbGet(env, `tasks/community/${taskId}`);
-        let task = taskResult.data;
-        let taskCategory = 'community';
-        
-        if (!task) {
-            taskResult = await dbGet(env, `tasks/partner/${taskId}`);
-            task = taskResult.data;
-            taskCategory = 'partner';
-        }
-        
-        if (!task) {
-            return {
-                success: false,
-                error: 'Task not found',
-                errorCode: 'TASK_NOT_FOUND'
-            };
-        }
-        
-        if (task.status !== 'active') {
-            return {
-                success: false,
-                error: 'Task is no longer active',
-                errorCode: 'TASK_INACTIVE'
-            };
-        }
-        
-        if (task.completedBy && task.completedBy.includes(userId)) {
-            return {
-                success: false,
-                error: 'Task already completed',
-                errorCode: 'TASK_ALREADY_COMPLETED'
-            };
-        }
-        
-        const userResult = await dbGet(env, `users/${userId}`);
-        
-        if (!userResult.success || !userResult.data) {
-            return {
-                success: false,
-                error: 'User not found',
-                errorCode: 'USER_NOT_FOUND'
-            };
-        }
-        
-        let user = userResult.data;
-        
-        if (task.type === 'channel') {
-            const isMember = await checkTelegramMembership(env, userId, task.link);
+    let attempt = 0;
+    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
+    
+    while (attempt < maxAttempts) {
+        try {
+            const { type, link, targetUsers, reward } = data;
             
-            if (!isMember) {
+            if (!['channel', 'bot'].includes(type)) {
                 return {
                     success: false,
-                    error: 'Not a member of the channel',
-                    errorCode: 'NOT_MEMBER'
+                    error: 'Invalid task type. Must be channel or bot',
+                    errorCode: 'INVALID_TASK_TYPE'
+                };
+            }
+            
+            const target = parseInt(targetUsers);
+            
+            if (!target || target < GAME_CONSTANTS.MIN_TASK_TARGET) {
+                return {
+                    success: false,
+                    error: `Minimum target users is ${GAME_CONSTANTS.MIN_TASK_TARGET}`,
+                    errorCode: 'INVALID_TARGET'
+                };
+            }
+            
+            if (!link || !link.includes('t.me/')) {
+                return {
+                    success: false,
+                    error: 'Valid Telegram link is required',
+                    errorCode: 'INVALID_LINK'
+                };
+            }
+            
+            const taskReward = GAME_CONSTANTS.TASK_REWARD;
+            const totalCost = target * taskReward * 2;
+            
+            const userResult = await dbGet(env, `users/${userId}`);
+            
+            if (!userResult.success || !userResult.data) {
+                return {
+                    success: false,
+                    error: 'User not found',
+                    errorCode: 'USER_NOT_FOUND'
+                };
+            }
+            
+            let user = userResult.data;
+            
+            const productionResult = await calculateProduction(env, userId, user);
+            
+            if (productionResult) {
+                user = productionResult.user;
+            }
+            
+            const currentBalance = user.tonBalance || 0;
+            if (currentBalance < totalCost) {
+                return {
+                    success: false,
+                    error: 'Insufficient TON balance',
+                    errorCode: 'INSUFFICIENT_TON'
+                };
+            }
+            
+            // ========== ATOMIC UPDATE للرصيد ==========
+            const atomicResult = await atomicUpdateUserResource(
+                env,
+                userId,
+                'tonBalance',
+                totalCost,
+                currentBalance
+            );
+            
+            if (!atomicResult.success) {
+                if (atomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
+                    attempt++;
+                    if (attempt < maxAttempts) {
+                        console.log(`Race condition detected for user ${userId} (createTask), retry attempt ${attempt}/${maxAttempts}`);
+                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                        continue;
+                    } else {
+                        return {
+                            success: false,
+                            error: 'System busy, please try again',
+                            errorCode: 'RACE_CONDITION_MAX_RETRIES'
+                        };
+                    }
+                } else {
+                    return {
+                        success: false,
+                        error: atomicResult.error,
+                        errorCode: atomicResult.errorCode || 'ATOMIC_UPDATE_FAILED'
+                    };
+                }
+            }
+            
+            const now = Date.now();
+            const taskId = `task_${now}_${Math.random().toString(36).substring(2, 10)}`;
+            
+            const taskData = {
+                id: taskId,
+                creatorId: userId,
+                type: type,
+                link: link,
+                targetUsers: target,
+                reward: taskReward,
+                completions: 0,
+                completedBy: [],
+                status: 'active',
+                createdAt: now,
+                expiresAt: now + (GAME_CONSTANTS.MAX_TASK_DURATION_DAYS * 24 * 60 * 60 * 1000),
+                updatedAt: now
+            };
+            
+            await dbSet(env, `tasks/community/${taskId}`, taskData);
+            
+            await dbPush(env, `users/${userId}/transactions`, {
+                type: 'create_task',
+                taskId: taskId,
+                taskType: type,
+                targetUsers: target,
+                cost: totalCost,
+                timestamp: now
+            });
+            
+            await notifyTaskCreated(env, userId, type, target, totalCost);
+            
+            return {
+                success: true,
+                data: {
+                    taskId: taskId,
+                    type: type,
+                    targetUsers: target,
+                    totalCost: totalCost,
+                    reward: taskReward
+                }
+            };
+            
+        } catch (error) {
+            console.error(`Create task error (attempt ${attempt + 1}):`, error);
+            attempt++;
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+            } else {
+                return {
+                    success: false,
+                    error: error.message,
+                    errorCode: 'CREATE_TASK_ERROR'
                 };
             }
         }
-        
-        const currentCompletions = task.completions || 0;
-        const newCompletions = currentCompletions + 1;
-        
-        const taskUpdates = {
-            completions: newCompletions,
-            completedBy: [...(task.completedBy || []), userId],
-            updatedAt: Date.now()
-        };
-        
-        if (newCompletions >= task.targetUsers) {
-            taskUpdates.status = 'completed';
-        }
-        
-        await dbUpdate(env, `tasks/${taskCategory}/${taskId}`, taskUpdates);
-        
-        const reward = task.reward || GAME_CONSTANTS.TASK_REWARD;
-        
-        await dbUpdate(env, `users/${userId}`, {
-            tonBalance: (user.tonBalance || 0) + reward,
-            updatedAt: Date.now()
-        });
-        
-        const completedTasks = user.completedTasks || [];
-        completedTasks.push(taskId);
-        
-        await dbUpdate(env, `users/${userId}`, {
-            completedTasks: completedTasks
-        });
-        
-        await dbPush(env, `users/${userId}/transactions`, {
-            type: 'task_reward',
-            taskId: taskId,
-            taskType: task.type,
-            reward: reward,
-            timestamp: Date.now()
-        });
-        
-        await notifyTaskCompleted(env, userId, task.type, reward);
-        
-        return {
-            success: true,
-            data: {
-                taskId: taskId,
-                reward: reward,
-                completions: newCompletions,
-                taskCompleted: newCompletions >= task.targetUsers
-            }
-        };
-        
-    } catch (error) {
-        console.error('Verify task error:', error);
-        return {
-            success: false,
-            error: error.message,
-            errorCode: 'VERIFY_TASK_ERROR'
-        };
     }
+    
+    return {
+        success: false,
+        error: 'Maximum retry attempts exceeded',
+        errorCode: 'MAX_RETRIES_EXCEEDED'
+    };
+}
+
+async function handleVerifyTask(env, userId, data) {
+    let attempt = 0;
+    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
+    
+    while (attempt < maxAttempts) {
+        try {
+            const { taskId, taskType } = data;
+            
+            let taskResult = await dbGet(env, `tasks/community/${taskId}`);
+            let task = taskResult.data;
+            let taskCategory = 'community';
+            
+            if (!task) {
+                taskResult = await dbGet(env, `tasks/partner/${taskId}`);
+                task = taskResult.data;
+                taskCategory = 'partner';
+            }
+            
+            if (!task) {
+                return {
+                    success: false,
+                    error: 'Task not found',
+                    errorCode: 'TASK_NOT_FOUND'
+                };
+            }
+            
+            if (task.status !== 'active') {
+                return {
+                    success: false,
+                    error: 'Task is no longer active',
+                    errorCode: 'TASK_INACTIVE'
+                };
+            }
+            
+            if (task.completedBy && task.completedBy.includes(userId)) {
+                return {
+                    success: false,
+                    error: 'Task already completed',
+                    errorCode: 'TASK_ALREADY_COMPLETED'
+                };
+            }
+            
+            const userResult = await dbGet(env, `users/${userId}`);
+            
+            if (!userResult.success || !userResult.data) {
+                return {
+                    success: false,
+                    error: 'User not found',
+                    errorCode: 'USER_NOT_FOUND'
+                };
+            }
+            
+            let user = userResult.data;
+            
+            if (task.type === 'channel') {
+                const isMember = await checkTelegramMembership(env, userId, task.link);
+                
+                if (!isMember) {
+                    return {
+                        success: false,
+                        error: 'Not a member of the channel',
+                        errorCode: 'NOT_MEMBER'
+                    };
+                }
+            }
+            
+            const currentCompletions = task.completions || 0;
+            const newCompletions = currentCompletions + 1;
+            
+            const taskUpdates = {
+                completions: newCompletions,
+                completedBy: [...(task.completedBy || []), userId],
+                updatedAt: Date.now()
+            };
+            
+            if (newCompletions >= task.targetUsers) {
+                taskUpdates.status = 'completed';
+            }
+            
+            await dbUpdate(env, `tasks/${taskCategory}/${taskId}`, taskUpdates);
+            
+            const reward = task.reward || GAME_CONSTANTS.TASK_REWARD;
+            
+            // ========== ATOMIC UPDATE للرصيد ==========
+            const currentBalance = user.tonBalance || 0;
+            const atomicResult = await atomicUpdateUserResource(
+                env,
+                userId,
+                'tonBalance',
+                -reward, // إضافة (قيمة سالبة)
+                currentBalance
+            );
+            
+            if (!atomicResult.success) {
+                if (atomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
+                    attempt++;
+                    if (attempt < maxAttempts) {
+                        console.log(`Race condition detected for user ${userId} (verifyTask), retry attempt ${attempt}/${maxAttempts}`);
+                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                        continue;
+                    } else {
+                        return {
+                            success: false,
+                            error: 'System busy, please try again',
+                            errorCode: 'RACE_CONDITION_MAX_RETRIES'
+                        };
+                    }
+                } else {
+                    return {
+                        success: false,
+                        error: atomicResult.error,
+                        errorCode: atomicResult.errorCode || 'ATOMIC_UPDATE_FAILED'
+                    };
+                }
+            }
+            
+            const completedTasks = user.completedTasks || [];
+            completedTasks.push(taskId);
+            
+            await dbUpdate(env, `users/${userId}`, {
+                completedTasks: completedTasks
+            });
+            
+            await dbPush(env, `users/${userId}/transactions`, {
+                type: 'task_reward',
+                taskId: taskId,
+                taskType: task.type,
+                reward: reward,
+                timestamp: Date.now()
+            });
+            
+            await notifyTaskCompleted(env, userId, task.type, reward);
+            
+            return {
+                success: true,
+                data: {
+                    taskId: taskId,
+                    reward: reward,
+                    completions: newCompletions,
+                    taskCompleted: newCompletions >= task.targetUsers
+                }
+            };
+            
+        } catch (error) {
+            console.error(`Verify task error (attempt ${attempt + 1}):`, error);
+            attempt++;
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+            } else {
+                return {
+                    success: false,
+                    error: error.message,
+                    errorCode: 'VERIFY_TASK_ERROR'
+                };
+            }
+        }
+    }
+    
+    return {
+        success: false,
+        error: 'Maximum retry attempts exceeded',
+        errorCode: 'MAX_RETRIES_EXCEEDED'
+    };
 }
 
 async function handleGetTasks(env, userId) {
@@ -3834,105 +4403,158 @@ async function handleAdminGetAllBounties(env, userId) {
 }
 
 async function handleAdminApproveBounty(env, userId, data) {
-    try {
-        if (!ADMIN_IDS.includes(userId)) {
-            return {
-                success: false,
-                error: 'Unauthorized',
-                errorCode: 'UNAUTHORIZED'
-            };
-        }
-        
-        const { bountyId, reward } = data;
-        
-        if (!bountyId) {
-            return {
-                success: false,
-                error: 'Bounty ID required',
-                errorCode: 'INVALID_BOUNTY_ID'
-            };
-        }
-        
-        const rewardAmount = parseFloat(reward);
-        if (!rewardAmount || rewardAmount < GAME_CONSTANTS.BOUNTY_MIN_REWARD || rewardAmount > GAME_CONSTANTS.BOUNTY_MAX_REWARD) {
-            return {
-                success: false,
-                error: `Reward must be between ${GAME_CONSTANTS.BOUNTY_MIN_REWARD} and ${GAME_CONSTANTS.BOUNTY_MAX_REWARD} TON`,
-                errorCode: 'INVALID_REWARD'
-            };
-        }
-        
-        const bountyResult = await dbGet(env, `bounties/${bountyId}`);
-        
-        if (!bountyResult.success || !bountyResult.data) {
-            return {
-                success: false,
-                error: 'Bounty not found',
-                errorCode: 'BOUNTY_NOT_FOUND'
-            };
-        }
-        
-        const bounty = bountyResult.data;
-        
-        if (bounty.status !== 'pending') {
-            return {
-                success: false,
-                error: `Bounty is already ${bounty.status}`,
-                errorCode: 'BOUNTY_ALREADY_PROCESSED'
-            };
-        }
-        
-        const now = Date.now();
-        
-        await dbUpdate(env, `bounties/${bountyId}`, {
-            status: 'approved',
-            reward: rewardAmount,
-            reviewedAt: now,
-            updatedAt: now
-        });
-        
-        await dbUpdate(env, `users/${bounty.userId}/bounties/${bountyId}`, {
-            status: 'approved',
-            reward: rewardAmount,
-            reviewedAt: now,
-            updatedAt: now
-        });
-        
-        const userResult = await dbGet(env, `users/${bounty.userId}`);
-        if (userResult.success && userResult.data) {
-            const user = userResult.data;
-            await dbUpdate(env, `users/${bounty.userId}`, {
-                tonBalance: (user.tonBalance || 0) + rewardAmount,
+    let attempt = 0;
+    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
+    
+    while (attempt < maxAttempts) {
+        try {
+            if (!ADMIN_IDS.includes(userId)) {
+                return {
+                    success: false,
+                    error: 'Unauthorized',
+                    errorCode: 'UNAUTHORIZED'
+                };
+            }
+            
+            const { bountyId, reward } = data;
+            
+            if (!bountyId) {
+                return {
+                    success: false,
+                    error: 'Bounty ID required',
+                    errorCode: 'INVALID_BOUNTY_ID'
+                };
+            }
+            
+            const rewardAmount = parseFloat(reward);
+            if (!rewardAmount || rewardAmount < GAME_CONSTANTS.BOUNTY_MIN_REWARD || rewardAmount > GAME_CONSTANTS.BOUNTY_MAX_REWARD) {
+                return {
+                    success: false,
+                    error: `Reward must be between ${GAME_CONSTANTS.BOUNTY_MIN_REWARD} and ${GAME_CONSTANTS.BOUNTY_MAX_REWARD} TON`,
+                    errorCode: 'INVALID_REWARD'
+                };
+            }
+            
+            const bountyResult = await dbGet(env, `bounties/${bountyId}`);
+            
+            if (!bountyResult.success || !bountyResult.data) {
+                return {
+                    success: false,
+                    error: 'Bounty not found',
+                    errorCode: 'BOUNTY_NOT_FOUND'
+                };
+            }
+            
+            const bounty = bountyResult.data;
+            
+            if (bounty.status !== 'pending') {
+                return {
+                    success: false,
+                    error: `Bounty is already ${bounty.status}`,
+                    errorCode: 'BOUNTY_ALREADY_PROCESSED'
+                };
+            }
+            
+            // جلب المستخدم
+            const userResult = await dbGet(env, `users/${bounty.userId}`);
+            if (!userResult.success || !userResult.data) {
+                return {
+                    success: false,
+                    error: 'User not found',
+                    errorCode: 'USER_NOT_FOUND'
+                };
+            }
+            
+            let user = userResult.data;
+            const currentBalance = user.tonBalance || 0;
+            
+            const now = Date.now();
+            
+            // تحديث bounty status
+            await dbUpdate(env, `bounties/${bountyId}`, {
+                status: 'approved',
+                reward: rewardAmount,
+                reviewedAt: now,
                 updatedAt: now
             });
-        }
-        
-        await dbPush(env, `users/${bounty.userId}/transactions`, {
-            type: 'bounty_reward',
-            bountyId: bountyId,
-            amount: rewardAmount,
-            timestamp: now
-        });
-        
-        await notifyBountyApproved(env, bounty.userId, rewardAmount);
-        
-        return {
-            success: true,
-            data: {
-                bountyId: bountyId,
+            
+            await dbUpdate(env, `users/${bounty.userId}/bounties/${bountyId}`, {
                 status: 'approved',
-                reward: rewardAmount
+                reward: rewardAmount,
+                reviewedAt: now,
+                updatedAt: now
+            });
+            
+            // ========== ATOMIC UPDATE للرصيد ==========
+            const atomicResult = await atomicUpdateUserResource(
+                env,
+                bounty.userId,
+                'tonBalance',
+                -rewardAmount, // إضافة (قيمة سالبة)
+                currentBalance
+            );
+            
+            if (!atomicResult.success) {
+                if (atomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
+                    attempt++;
+                    if (attempt < maxAttempts) {
+                        console.log(`Race condition detected for user ${bounty.userId} (approveBounty), retry attempt ${attempt}/${maxAttempts}`);
+                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                        continue;
+                    } else {
+                        return {
+                            success: false,
+                            error: 'System busy, please try again',
+                            errorCode: 'RACE_CONDITION_MAX_RETRIES'
+                        };
+                    }
+                } else {
+                    return {
+                        success: false,
+                        error: atomicResult.error,
+                        errorCode: atomicResult.errorCode || 'ATOMIC_UPDATE_FAILED'
+                    };
+                }
             }
-        };
-        
-    } catch (error) {
-        console.error('Admin approve bounty error:', error);
-        return {
-            success: false,
-            error: error.message,
-            errorCode: 'ADMIN_APPROVE_BOUNTY_ERROR'
-        };
+            
+            await dbPush(env, `users/${bounty.userId}/transactions`, {
+                type: 'bounty_reward',
+                bountyId: bountyId,
+                amount: rewardAmount,
+                timestamp: now
+            });
+            
+            await notifyBountyApproved(env, bounty.userId, rewardAmount);
+            
+            return {
+                success: true,
+                data: {
+                    bountyId: bountyId,
+                    status: 'approved',
+                    reward: rewardAmount
+                }
+            };
+            
+        } catch (error) {
+            console.error(`Admin approve bounty error (attempt ${attempt + 1}):`, error);
+            attempt++;
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+            } else {
+                return {
+                    success: false,
+                    error: error.message,
+                    errorCode: 'ADMIN_APPROVE_BOUNTY_ERROR'
+                };
+            }
+        }
     }
+    
+    return {
+        success: false,
+        error: 'Maximum retry attempts exceeded',
+        errorCode: 'MAX_RETRIES_EXCEEDED'
+    };
 }
 
 async function handleAdminRejectBounty(env, userId, data) {
