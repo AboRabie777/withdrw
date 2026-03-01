@@ -1,0 +1,1645 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crystal Ranch · Auto-Cancel Excessive Orders</title>
+    
+    <!-- Fonts & Icons -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    
+    <!-- Firebase SDKs -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(135deg, #0a0a0a, #1a1a2e);
+            color: white;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+        
+        /* Header Styles */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 16px;
+            border: 1px solid rgba(255, 92, 168, 0.3);
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+        
+        .header h1 {
+            font-size: 24px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .header h1 i {
+            color: #FF5CA8;
+        }
+        
+        .header h1 span {
+            background: rgba(255, 75, 92, 0.2);
+            color: #FF4B5C;
+            padding: 5px 10px;
+            border-radius: 20px;
+            font-size: 14px;
+            margin-left: 10px;
+        }
+        
+        .stats-grid {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .stat-box {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 12px;
+            padding: 15px 25px;
+            text-align: center;
+            border: 1px solid rgba(255, 215, 0, 0.3);
+            min-width: 120px;
+        }
+        
+        .stat-value {
+            font-size: 28px;
+            font-weight: 700;
+            color: #FFD700;
+        }
+        
+        .stat-label {
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.7);
+            margin-top: 5px;
+        }
+        
+        /* Warning Banner */
+        .warning-banner {
+            background: rgba(255, 75, 92, 0.15);
+            border: 1px solid #FF4B5C;
+            border-radius: 12px;
+            padding: 15px 20px;
+            margin-bottom: 25px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+        
+        .warning-icon {
+            font-size: 30px;
+            color: #FF4B5C;
+            animation: pulse 1.5s infinite;
+        }
+        
+        .warning-text {
+            flex: 1;
+        }
+        
+        .warning-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #FF4B5C;
+            margin-bottom: 5px;
+        }
+        
+        .warning-desc {
+            font-size: 13px;
+            color: rgba(255, 255, 255, 0.8);
+        }
+        
+        .warning-stats {
+            display: flex;
+            gap: 20px;
+        }
+        
+        .warning-stat {
+            text-align: center;
+        }
+        
+        .warning-stat-value {
+            font-size: 24px;
+            font-weight: 700;
+            color: #FFD700;
+        }
+        
+        .warning-stat-label {
+            font-size: 11px;
+            color: rgba(255, 255, 255, 0.6);
+        }
+        
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.1); opacity: 0.8; }
+        }
+        
+        /* Threshold Cards */
+        .threshold-section {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+        
+        .threshold-card {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 12px;
+            padding: 15px;
+            border: 1px solid rgba(255, 215, 0, 0.2);
+        }
+        
+        .threshold-title {
+            font-size: 13px;
+            color: rgba(255, 255, 255, 0.7);
+            margin-bottom: 5px;
+        }
+        
+        .threshold-value {
+            font-size: 24px;
+            font-weight: 700;
+            color: #FFD700;
+        }
+        
+        .threshold-note {
+            font-size: 11px;
+            color: #FF4B5C;
+            margin-top: 5px;
+        }
+        
+        /* Controls */
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 25px;
+            flex-wrap: wrap;
+        }
+        
+        .btn {
+            padding: 12px 24px;
+            border-radius: 30px;
+            border: none;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.2s;
+            font-family: 'Inter', sans-serif;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(145deg, #FF5CA8, #D94A8F);
+            color: white;
+            box-shadow: 0 4px 15px rgba(255, 92, 168, 0.4);
+        }
+        
+        .btn-danger {
+            background: linear-gradient(145deg, #FF4B5C, #d63f4f);
+            color: white;
+            box-shadow: 0 4px 15px rgba(255, 75, 92, 0.4);
+        }
+        
+        .btn-warning {
+            background: linear-gradient(145deg, #FFD700, #FFA500);
+            color: black;
+            box-shadow: 0 4px 15px rgba(255, 215, 0, 0.4);
+        }
+        
+        .btn-success {
+            background: linear-gradient(145deg, #00F27A, #00b35e);
+            color: white;
+            box-shadow: 0 4px 15px rgba(0, 242, 122, 0.4);
+        }
+        
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: white;
+        }
+        
+        .btn:hover {
+            transform: scale(1.02);
+        }
+        
+        .btn:active {
+            transform: scale(0.98);
+        }
+        
+        /* Summary Cards */
+        .summary-section {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .summary-card {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 16px;
+            padding: 20px;
+            border: 1px solid rgba(255, 215, 0, 0.2);
+        }
+        
+        .summary-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #FFD700;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .summary-list {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        
+        .summary-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            font-size: 13px;
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 20px;
+            font-size: 10px;
+            font-weight: 600;
+        }
+        
+        .badge-danger {
+            background: rgba(255, 75, 92, 0.2);
+            color: #FF4B5C;
+            border: 1px solid rgba(255, 75, 92, 0.3);
+        }
+        
+        .badge-warning {
+            background: rgba(255, 215, 0, 0.2);
+            color: #FFD700;
+            border: 1px solid rgba(255, 215, 0, 0.3);
+        }
+        
+        .badge-success {
+            background: rgba(0, 242, 122, 0.2);
+            color: #00F27A;
+            border: 1px solid rgba(0, 242, 122, 0.3);
+        }
+        
+        .badge-info {
+            background: rgba(0, 212, 255, 0.2);
+            color: #00D4FF;
+            border: 1px solid rgba(0, 212, 255, 0.3);
+        }
+        
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 1px solid rgba(255, 215, 0, 0.2);
+            padding-bottom: 10px;
+            flex-wrap: wrap;
+        }
+        
+        .tab {
+            padding: 10px 20px;
+            border-radius: 30px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.2s;
+            background: rgba(255, 255, 255, 0.05);
+        }
+        
+        .tab.active {
+            background: rgba(255, 215, 0, 0.2);
+            color: #FFD700;
+            border: 1px solid rgba(255, 215, 0, 0.3);
+        }
+        
+        .tab:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+        
+        /* Tables */
+        .table-container {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 16px;
+            border: 1px solid rgba(255, 215, 0, 0.2);
+            overflow: auto;
+            margin-bottom: 30px;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 1200px;
+        }
+        
+        th {
+            background: rgba(0, 0, 0, 0.5);
+            padding: 15px 10px;
+            text-align: left;
+            font-size: 12px;
+            font-weight: 600;
+            color: #FFD700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 2px solid #FFD700;
+        }
+        
+        td {
+            padding: 15px 10px;
+            border-bottom: 1px solid rgba(255, 215, 0, 0.1);
+            font-size: 13px;
+        }
+        
+        tr:hover {
+            background: rgba(255, 215, 0, 0.05);
+        }
+        
+        tr.suspicious-user {
+            background: rgba(255, 75, 92, 0.15);
+            border-left: 3px solid #FF4B5C;
+        }
+        
+        tr.high-orders {
+            background: rgba(255, 165, 0, 0.15);
+            border-left: 3px solid #FFA500;
+        }
+        
+        .user-cell {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .user-avatar {
+            width: 32px;
+            height: 32px;
+            background: linear-gradient(145deg, #FF5CA8, #00D4FF);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+        }
+        
+        .action-buttons {
+            display: flex;
+            gap: 5px;
+            flex-wrap: wrap;
+        }
+        
+        .action-btn {
+            padding: 6px 10px;
+            border-radius: 8px;
+            border: none;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .action-btn.reset {
+            background: rgba(255, 75, 92, 0.2);
+            color: #FF4B5C;
+            border: 1px solid rgba(255, 75, 92, 0.3);
+        }
+        
+        .action-btn.reset:hover {
+            background: rgba(255, 75, 92, 0.4);
+        }
+        
+        .action-btn.view {
+            background: rgba(0, 212, 255, 0.2);
+            color: #00D4FF;
+            border: 1px solid rgba(0, 212, 255, 0.3);
+        }
+        
+        .action-btn.view:hover {
+            background: rgba(0, 212, 255, 0.4);
+        }
+        
+        .action-btn.cancel {
+            background: rgba(255, 165, 0, 0.2);
+            color: #FFA500;
+            border: 1px solid rgba(255, 165, 0, 0.3);
+        }
+        
+        .action-btn.cancel:hover {
+            background: rgba(255, 165, 0, 0.4);
+        }
+        
+        /* Modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.95);
+            backdrop-filter: blur(10px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.3s;
+        }
+        
+        .modal-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+        
+        .modal-content {
+            background: #1a1a2e;
+            border: 1px solid #FFD700;
+            border-radius: 24px;
+            padding: 25px;
+            width: 90%;
+            max-width: 800px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+        
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .modal-title {
+            font-size: 20px;
+            font-weight: 700;
+            color: #FFD700;
+        }
+        
+        .modal-close {
+            font-size: 24px;
+            color: rgba(255, 255, 255, 0.5);
+            cursor: pointer;
+        }
+        
+        .orders-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .order-item {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 12px;
+            padding: 12px;
+            margin-bottom: 10px;
+            border: 1px solid rgba(255, 215, 0, 0.1);
+        }
+        
+        .order-item.cancelled {
+            opacity: 0.7;
+            background: rgba(255, 75, 92, 0.1);
+        }
+        
+        .order-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+        
+        .order-id {
+            font-family: monospace;
+            color: #FFD700;
+        }
+        
+        .order-status {
+            font-size: 11px;
+            padding: 3px 8px;
+            border-radius: 20px;
+        }
+        
+        .status-active { background: rgba(0, 242, 122, 0.2); color: #00F27A; }
+        .status-cancelled { background: rgba(255, 75, 92, 0.2); color: #FF4B5C; }
+        .status-filled { background: rgba(0, 212, 255, 0.2); color: #00D4FF; }
+        
+        .order-details {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            font-size: 12px;
+        }
+        
+        .reason-list {
+            margin-top: 15px;
+            padding: 15px;
+            background: rgba(255, 75, 92, 0.1);
+            border-radius: 10px;
+        }
+        
+        .reason-item {
+            color: #FF4B5C;
+            font-size: 13px;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 50px;
+            color: rgba(255, 255, 255, 0.5);
+        }
+        
+        .loading i {
+            font-size: 40px;
+            margin-bottom: 15px;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 4px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 2px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #FFD700, #FF5CA8);
+            transition: width 0.3s;
+        }
+        
+        .metric-highlight {
+            color: #FFD700;
+            font-weight: 600;
+        }
+        
+        .toast {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: #00F27A;
+            color: black;
+            padding: 15px 25px;
+            border-radius: 30px;
+            font-weight: 600;
+            z-index: 2000;
+            animation: slideIn 0.3s;
+            box-shadow: 0 5px 20px rgba(0, 242, 122, 0.4);
+        }
+        
+        .toast.error {
+            background: #FF4B5C;
+            color: white;
+        }
+        
+        .toast.warning {
+            background: #FFA500;
+            color: black;
+        }
+        
+        @keyframes slideIn {
+            from { transform: translateX(100px); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>
+                <i class="fas fa-robot"></i>
+                Auto-Cancel Excessive Orders
+                <span>Active Orders Monitor</span>
+            </h1>
+            <div class="stats-grid">
+                <div class="stat-box">
+                    <div class="stat-value" id="totalUsers">0</div>
+                    <div class="stat-label">Total Users</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value" id="totalOrders">0</div>
+                    <div class="stat-label">Total Orders</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value" id="activeOrders">0</div>
+                    <div class="stat-label">Active</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value" id="usersWithExcess">0</div>
+                    <div class="stat-label">Excess Users</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value" id="excessOrders">0</div>
+                    <div class="stat-label">Excess Orders</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Warning Banner (shown when excess orders found) -->
+        <div class="warning-banner" id="warningBanner" style="display: none;">
+            <div class="warning-icon">
+                <i class="fas fa-exclamation-triangle"></i>
+            </div>
+            <div class="warning-text">
+                <div class="warning-title">⚠️ Excessive Active Orders Detected</div>
+                <div class="warning-desc">
+                    Users with more than 2 active orders will have their excess orders automatically cancelled and refunded.
+                </div>
+            </div>
+            <div class="warning-stats">
+                <div class="warning-stat">
+                    <div class="warning-stat-value" id="warningUserCount">0</div>
+                    <div class="warning-stat-label">Users</div>
+                </div>
+                <div class="warning-stat">
+                    <div class="warning-stat-value" id="warningOrderCount">0</div>
+                    <div class="warning-stat-label">Orders</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Threshold Cards -->
+        <div class="threshold-section">
+            <div class="threshold-card">
+                <div class="threshold-title">Max Active Orders</div>
+                <div class="threshold-value">> 2</div>
+                <div class="threshold-note">Any user with > 2 active orders</div>
+            </div>
+            <div class="threshold-card">
+                <div class="threshold-title">Auto-Cancel Action</div>
+                <div class="threshold-value">Cancel Excess</div>
+                <div class="threshold-note">Keep only 2 newest orders</div>
+            </div>
+            <div class="threshold-card">
+                <div class="threshold-title">Refund</div>
+                <div class="threshold-value">100%</div>
+                <div class="threshold-note">Resource returned to user</div>
+            </div>
+        </div>
+        
+        <!-- Controls -->
+        <div class="controls">
+            <button class="btn btn-primary" id="scanBtn">
+                <i class="fas fa-search"></i> Scan & Auto-Cancel
+            </button>
+            <button class="btn btn-warning" id="cancelAllExcessBtn">
+                <i class="fas fa-ban"></i> Cancel All Excess Orders
+            </button>
+            <button class="btn btn-danger" id="resetAllBtn">
+                <i class="fas fa-skull-crosswalk"></i> Reset All Suspicious
+            </button>
+            <button class="btn btn-success" id="refreshBtn">
+                <i class="fas fa-sync-alt"></i> Refresh Data
+            </button>
+        </div>
+        
+        <!-- Summary Cards -->
+        <div class="summary-section">
+            <div class="summary-card">
+                <div class="summary-title">
+                    <i class="fas fa-exclamation-triangle" style="color: #FF4B5C;"></i>
+                    Users with Excess Orders
+                </div>
+                <div class="summary-list" id="excessUsersList">
+                    <div class="loading" style="padding: 20px;">
+                        <i class="fas fa-spinner fa-spin"></i>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="summary-card">
+                <div class="summary-title">
+                    <i class="fas fa-coins" style="color: #FFD700;"></i>
+                    High Balance Users
+                </div>
+                <div class="summary-list" id="highBalanceList">
+                    <div class="loading" style="padding: 20px;">
+                        <i class="fas fa-spinner fa-spin"></i>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="summary-card">
+                <div class="summary-title">
+                    <i class="fas fa-tint" style="color: #00D4FF;"></i>
+                    High Resource Users
+                </div>
+                <div class="summary-list" id="highResourcesList">
+                    <div class="loading" style="padding: 20px;">
+                        <i class="fas fa-spinner fa-spin"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Progress -->
+        <div id="progressContainer" style="display: none; margin-bottom: 20px;">
+            <div class="summary-card">
+                <div class="summary-row" style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                    <span>Processing...</span>
+                    <span id="progressText">0/0</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill" style="width: 0%;"></div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Users Table -->
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>User</th>
+                        <th>User ID</th>
+                        <th>TON Balance</th>
+                        <th>Milk</th>
+                        <th>Eggs</th>
+                        <th>Active Orders</th>
+                        <th>Excess Orders</th>
+                        <th>Suspicious Reasons</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="usersTableBody">
+                    <tr>
+                        <td colspan="9" class="loading">
+                            <i class="fas fa-spinner fa-spin"></i>
+                            <div>Loading users...</div>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    
+    <!-- User Details Modal -->
+    <div class="modal-overlay" id="userModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title">
+                    <i class="fas fa-user"></i> User Orders
+                </div>
+                <i class="fas fa-times modal-close" id="closeModal"></i>
+            </div>
+            <div id="userOrdersList" class="orders-list"></div>
+            <div style="display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap;">
+                <button class="btn btn-warning" id="cancelExcessBtn" style="flex: 1;">
+                    <i class="fas fa-ban"></i> Cancel Excess Orders
+                </button>
+                <button class="btn btn-danger" id="resetUserBtn" style="flex: 1;">
+                    <i class="fas fa-skull-crosswalk"></i> Reset User
+                </button>
+                <button class="btn btn-secondary" id="closeModalBtn" style="flex: 1;">
+                    Close
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Cancel Confirmation Modal -->
+    <div class="modal-overlay" id="cancelConfirmModal">
+        <div class="modal-content" style="max-width: 400px;">
+            <div class="modal-header">
+                <div class="modal-title">
+                    <i class="fas fa-exclamation-triangle" style="color: #FFA500;"></i> Confirm Cancel
+                </div>
+                <i class="fas fa-times modal-close" id="closeCancelModal"></i>
+            </div>
+            <div style="text-align: center; padding: 20px;">
+                <i class="fas fa-ban" style="font-size: 48px; color: #FFA500; margin-bottom: 15px;"></i>
+                <p id="cancelConfirmText">Are you sure?</p>
+            </div>
+            <div style="display: flex; gap: 10px;">
+                <button class="btn btn-warning" id="confirmCancelBtn" style="flex: 1;">
+                    <i class="fas fa-check"></i> Confirm
+                </button>
+                <button class="btn btn-secondary" id="cancelCancelBtn" style="flex: 1;">
+                    Cancel
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Firebase Configuration
+        const firebaseConfig = {
+            apiKey: "AIzaSyC5dwRaz3L-aK7I5CoPkbB31MzXB62lgrU",
+            authDomain: "earnmoney124553.firebaseapp.com",
+            databaseURL: "https://earnmoney124553-default-rtdb.firebaseio.com",
+            projectId: "earnmoney124553",
+            storageBucket: "earnmoney124553.firebasestorage.app",
+            messagingSenderId: "325528918523",
+            appId: "1:325528918523:web:73d84f48a24c1e0cbfd35e",
+            measurementId: "G-G1H96Q5XCJ"
+        };
+
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const database = firebase.database();
+
+        // ============================================
+        // THRESHOLDS
+        // ============================================
+        const THRESHOLDS = {
+            MAX_ACTIVE_ORDERS: 2,           // أكثر من طلبين نشطين
+            TON_BALANCE: 3,                  // أكثر من 3 تون
+            MILK: 10000,                      // أكثر من 10,000 حليب
+            EGGS: 10000                        // أكثر من 10,000 بيض
+        };
+
+        // ============================================
+        // STATE
+        // ============================================
+        let App = {
+            users: {},
+            orders: {},
+            userOrders: {},
+            
+            suspiciousUsers: [],
+            excessUsers: [],
+            highBalanceUsers: [],
+            highMilkUsers: [],
+            highEggsUsers: [],
+            
+            stats: {
+                totalUsers: 0,
+                totalOrders: 0,
+                activeOrders: 0,
+                usersWithExcess: 0,
+                excessOrders: 0
+            },
+            
+            pendingCancel: null
+        };
+
+        // ============================================
+        // LOAD DATA FROM FIREBASE
+        // ============================================
+        async function loadData() {
+            showProgress(true, 'Loading data...');
+            
+            try {
+                // Load users
+                const usersSnapshot = await database.ref('users').once('value');
+                App.users = usersSnapshot.val() || {};
+                
+                // Load orders
+                const ordersSnapshot = await database.ref('orders').once('value');
+                App.orders = ordersSnapshot.val() || {};
+                
+                // Group orders by user
+                groupOrdersByUser();
+                
+                updateStats();
+                scanUsers();
+                
+                showToast(`Loaded ${App.stats.totalUsers} users, ${App.stats.totalOrders} orders`);
+                
+            } catch (error) {
+                console.error('Error loading data:', error);
+                showToast('Error loading data: ' + error.message, 'error');
+            } finally {
+                showProgress(false);
+            }
+        }
+
+        // ============================================
+        // GROUP ORDERS BY USER
+        // ============================================
+        function groupOrdersByUser() {
+            App.userOrders = {};
+            
+            for (const [orderId, order] of Object.entries(App.orders)) {
+                if (!order) continue;
+                
+                const userId = order.userId;
+                if (!App.userOrders[userId]) {
+                    App.userOrders[userId] = [];
+                }
+                
+                App.userOrders[userId].push({
+                    orderId,
+                    ...order
+                });
+            }
+            
+            // Sort orders by date (newest first)
+            for (const userId in App.userOrders) {
+                App.userOrders[userId].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+            }
+        }
+
+        // ============================================
+        // SCAN USERS (WITH AUTO-CANCEL)
+        // ============================================
+        function scanUsers() {
+            showProgress(true, 'Scanning users...');
+            
+            App.suspiciousUsers = [];
+            App.excessUsers = [];
+            App.highBalanceUsers = [];
+            App.highMilkUsers = [];
+            App.highEggsUsers = [];
+            
+            const users = App.users;
+            
+            for (const [userId, user] of Object.entries(users)) {
+                if (!user) continue;
+                
+                const reasons = [];
+                const metrics = {
+                    tonBalance: user.tonBalance || 0,
+                    milk: user.milk || 0,
+                    eggs: user.eggs || 0,
+                    diamond: user.diamond || 0
+                };
+                
+                // Get user's active orders
+                const userOrders = App.userOrders[userId] || [];
+                const activeOrders = userOrders.filter(o => o.status === 'active');
+                const activeCount = activeOrders.length;
+                
+                // ========== معيار الطلبات النشطة ==========
+                if (activeCount > THRESHOLDS.MAX_ACTIVE_ORDERS) {
+                    const excessCount = activeCount - THRESHOLDS.MAX_ACTIVE_ORDERS;
+                    reasons.push(`Excessive active orders: ${activeCount} (max ${THRESHOLDS.MAX_ACTIVE_ORDERS})`);
+                    
+                    App.excessUsers.push({
+                        userId,
+                        user,
+                        activeOrders: activeOrders,
+                        activeCount,
+                        excessCount
+                    });
+                }
+                
+                // ========== رصيد تون كبير ==========
+                if (metrics.tonBalance > THRESHOLDS.TON_BALANCE) {
+                    reasons.push(`High TON balance: ${formatTON(metrics.tonBalance)} TON`);
+                    App.highBalanceUsers.push({ userId, user, balance: metrics.tonBalance });
+                }
+                
+                // ========== حليب كبير ==========
+                if (metrics.milk > THRESHOLDS.MILK) {
+                    reasons.push(`High milk: ${formatNumber(metrics.milk)} 🥛`);
+                    App.highMilkUsers.push({ userId, user, milk: metrics.milk });
+                }
+                
+                // ========== بيض كبير ==========
+                if (metrics.eggs > THRESHOLDS.EGGS) {
+                    reasons.push(`High eggs: ${formatNumber(metrics.eggs)} 🥚`);
+                    App.highEggsUsers.push({ userId, user, eggs: metrics.eggs });
+                }
+                
+                if (reasons.length > 0) {
+                    App.suspiciousUsers.push({
+                        userId,
+                        user,
+                        metrics,
+                        activeCount,
+                        reasons
+                    });
+                }
+            }
+            
+            // Sort lists
+            App.suspiciousUsers.sort((a, b) => b.reasons.length - a.reasons.length);
+            App.excessUsers.sort((a, b) => b.excessCount - a.excessCount);
+            App.highBalanceUsers.sort((a, b) => b.balance - a.balance);
+            App.highMilkUsers.sort((a, b) => b.milk - a.milk);
+            App.highEggsUsers.sort((a, b) => b.eggs - a.eggs);
+            
+            updateStats();
+            renderTable();
+            updateSummaryCards();
+            
+            // Show warning banner if excess users found
+            const warningBanner = document.getElementById('warningBanner');
+            if (App.excessUsers.length > 0) {
+                warningBanner.style.display = 'flex';
+                document.getElementById('warningUserCount').textContent = App.excessUsers.length;
+                document.getElementById('warningOrderCount').textContent = App.stats.excessOrders;
+            } else {
+                warningBanner.style.display = 'none';
+            }
+            
+            showProgress(false);
+            showToast(`Scan complete: ${App.suspiciousUsers.length} suspicious users, ${App.excessUsers.length} with excess orders`);
+        }
+
+        // ============================================
+        // AUTO-CANCEL EXCESS ORDERS
+        // ============================================
+        async function cancelExcessOrders(userId, keepCount = THRESHOLDS.MAX_ACTIVE_ORDERS) {
+            const userOrders = App.userOrders[userId] || [];
+            const activeOrders = userOrders
+                .filter(o => o.status === 'active')
+                .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)); // newest first
+            
+            if (activeOrders.length <= keepCount) {
+                return { cancelled: 0, message: 'No excess orders' };
+            }
+            
+            // Keep the newest 'keepCount' orders, cancel the rest
+            const ordersToKeep = activeOrders.slice(0, keepCount);
+            const ordersToCancel = activeOrders.slice(keepCount);
+            
+            let cancelled = 0;
+            let failed = 0;
+            
+            for (const order of ordersToCancel) {
+                try {
+                    await cancelSingleOrder(order);
+                    cancelled++;
+                } catch (error) {
+                    console.error(`Failed to cancel order ${order.orderId}:`, error);
+                    failed++;
+                }
+            }
+            
+            return { cancelled, failed };
+        }
+
+        // ============================================
+        // CANCEL SINGLE ORDER AND REFUND
+        // ============================================
+        async function cancelSingleOrder(order) {
+            // 1. تحديث حالة الطلب إلى cancelled
+            await database.ref(`orders/${order.orderId}`).update({
+                status: 'cancelled',
+                updatedAt: Date.now(),
+                cancelledBy: 'auto-system',
+                cancelReason: 'Excessive active orders'
+            });
+            
+            // 2. استرجاع الرصيد للمستخدم
+            const userRef = database.ref(`users/${order.userId}`);
+            const userSnapshot = await userRef.once('value');
+            const user = userSnapshot.val() || {};
+            
+            const resource = order.resource; // 'milk' or 'eggs'
+            const quantity = order.remaining || order.quantity;
+            
+            const updates = {};
+            updates[resource] = (user[resource] || 0) + quantity;
+            updates.updatedAt = Date.now();
+            
+            await userRef.update(updates);
+            
+            // 3. تحديث في userOrders
+            if (App.userOrders[order.userId]) {
+                const orderIndex = App.userOrders[order.userId].findIndex(o => o.orderId === order.orderId);
+                if (orderIndex !== -1) {
+                    App.userOrders[order.userId][orderIndex].status = 'cancelled';
+                }
+            }
+            
+            // 4. تسجيل المعاملة
+            await database.ref(`users/${order.userId}/transactions`).push({
+                type: 'auto_cancel',
+                orderId: order.orderId,
+                resource: resource,
+                quantity: quantity,
+                reason: 'Excessive active orders',
+                timestamp: Date.now()
+            });
+            
+            return true;
+        }
+
+        // ============================================
+        // CANCEL ALL EXCESS ORDERS (BATCH)
+        // ============================================
+        async function cancelAllExcessOrders() {
+            if (App.excessUsers.length === 0) {
+                showToast('No excess orders to cancel', 'error');
+                return;
+            }
+            
+            if (!confirm(`⚠️ Cancel all excess orders for ${App.excessUsers.length} users?\nThis will refund all resources.`)) {
+                return;
+            }
+            
+            showProgress(true, `Cancelling excess orders...`);
+            
+            let totalCancelled = 0;
+            let totalFailed = 0;
+            
+            for (let i = 0; i < App.excessUsers.length; i++) {
+                const user = App.excessUsers[i];
+                
+                const result = await cancelExcessOrders(user.userId);
+                totalCancelled += result.cancelled || 0;
+                totalFailed += result.failed || 0;
+                
+                const progress = ((i + 1) / App.excessUsers.length) * 100;
+                document.getElementById('progressFill').style.width = `${progress}%`;
+                document.getElementById('progressText').textContent = `${i + 1}/${App.excessUsers.length}`;
+            }
+            
+            showProgress(false);
+            showToast(`✅ Cancelled ${totalCancelled} orders, Failed: ${totalFailed}`);
+            
+            // Reload data
+            await loadData();
+        }
+
+        // ============================================
+        // RESET USER FUNCTION
+        // ============================================
+        async function resetUser(userId) {
+            const user = App.users[userId];
+            if (!user) return;
+            
+            if (!confirm(`⚠️ Are you sure you want to reset user ${userId}?\nThis will delete all their data!`)) {
+                return;
+            }
+            
+            showProgress(true, `Resetting user ${userId}...`);
+            
+            try {
+                // Cancel all active orders first
+                await cancelExcessOrders(userId, 0); // cancel all
+                
+                // Reset user data
+                const userRef = database.ref(`users/${userId}`);
+                
+                const now = Date.now();
+                const newUserData = {
+                    tonBalance: 0,
+                    milk: 0,
+                    eggs: 0,
+                    diamond: 0,
+                    
+                    cows_owned: 0,
+                    chickens_owned: 0,
+                    diamond_engines_owned: 0,
+                    
+                    lastProduction: now,
+                    
+                    referralCode: user.referralCode || `ref_${userId}`,
+                    referredBy: user.referredBy || null,
+                    referralEarnings: 0,
+                    referralEarningsClaimed: 0,
+                    
+                    firstName: user.firstName || '',
+                    lastName: user.lastName || '',
+                    username: user.username || '',
+                    photoUrl: user.photoUrl || '',
+                    
+                    language: user.language || 'en',
+                    
+                    completedTasks: user.completedTasks || [],
+                    
+                    createdAt: user.createdAt || now,
+                    updatedAt: now
+                };
+                
+                await userRef.update(newUserData);
+                
+                // Delete user's transactions
+                await database.ref(`users/${userId}/transactions`).remove();
+                await database.ref(`users/${userId}/deposits`).remove();
+                await database.ref(`users/${userId}/withdrawals`).remove();
+                
+                showToast(`✅ User ${userId} reset successfully!`);
+                
+                // Reload data
+                await loadData();
+                
+            } catch (error) {
+                console.error('Reset error:', error);
+                showToast(`❌ Error: ${error.message}`, 'error');
+            } finally {
+                showProgress(false);
+                document.getElementById('userModal').classList.remove('active');
+            }
+        }
+
+        // ============================================
+        // RENDER FUNCTIONS
+        // ============================================
+        function updateStats() {
+            let activeOrders = 0;
+            for (const orders of Object.values(App.userOrders)) {
+                activeOrders += orders.filter(o => o.status === 'active').length;
+            }
+            
+            let excessOrders = 0;
+            for (const user of App.excessUsers) {
+                excessOrders += user.excessCount;
+            }
+            
+            App.stats = {
+                totalUsers: Object.keys(App.users).length,
+                totalOrders: Object.keys(App.orders).length,
+                activeOrders: activeOrders,
+                usersWithExcess: App.excessUsers.length,
+                excessOrders: excessOrders
+            };
+            
+            document.getElementById('totalUsers').textContent = App.stats.totalUsers;
+            document.getElementById('totalOrders').textContent = App.stats.totalOrders;
+            document.getElementById('activeOrders').textContent = App.stats.activeOrders;
+            document.getElementById('usersWithExcess').textContent = App.stats.usersWithExcess;
+            document.getElementById('excessOrders').textContent = App.stats.excessOrders;
+        }
+
+        function renderTable() {
+            const tbody = document.getElementById('usersTableBody');
+            
+            if (Object.keys(App.users).length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="9" style="text-align: center; padding: 40px;">
+                            <i class="fas fa-users-slash" style="font-size: 40px;"></i>
+                            <div>No users found</div>
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+            
+            let html = '';
+            
+            for (const [userId, user] of Object.entries(App.users)) {
+                if (!user) continue;
+                
+                const suspicious = App.suspiciousUsers.find(s => s.userId === userId);
+                const excess = App.excessUsers.find(e => e.userId === userId);
+                
+                const isSuspicious = !!suspicious;
+                const hasExcess = !!excess;
+                
+                const rowClass = hasExcess ? 'high-orders' : (isSuspicious ? 'suspicious-user' : '');
+                
+                const userName = user.firstName || 'Unknown';
+                const userAvatar = user.photoUrl ? 
+                    `<img src="${user.photoUrl}" style="width: 32px; height: 32px; border-radius: 50%; object-fit: cover;">` :
+                    `<div class="user-avatar">${userName.charAt(0).toUpperCase()}</div>`;
+                
+                const tonBalance = user.tonBalance || 0;
+                const milk = user.milk || 0;
+                const eggs = user.eggs || 0;
+                
+                const activeOrders = App.userOrders[userId]?.filter(o => o.status === 'active').length || 0;
+                
+                const excessOrders = excess ? excess.excessCount : 0;
+                
+                // Highlight values that exceed thresholds
+                const tonClass = tonBalance > THRESHOLDS.TON_BALANCE ? 'metric-highlight' : '';
+                const milkClass = milk > THRESHOLDS.MILK ? 'metric-highlight' : '';
+                const eggsClass = eggs > THRESHOLDS.EGGS ? 'metric-highlight' : '';
+                
+                const reasonsHtml = suspicious ? 
+                    `<div style="max-width: 250px;">
+                        ${suspicious.reasons.slice(0, 2).map(r => 
+                            `<div style="font-size: 11px; color: #FF4B5C; margin-bottom: 3px;">• ${r}</div>`
+                        ).join('')}
+                        ${suspicious.reasons.length > 2 ? 
+                            `<div style="font-size: 10px; color: rgba(255,75,92,0.7);">+${suspicious.reasons.length - 2} more</div>` : 
+                            ''}
+                    </div>` : 
+                    '<span style="color: #00F27A;">✓ Clean</span>';
+                
+                html += `
+                    <tr class="${rowClass}">
+                        <td>
+                            <div class="user-cell">
+                                ${userAvatar}
+                                <span>${userName}</span>
+                            </div>
+                        </td>
+                        <td><code style="color: #FFD700;">${userId.substring(0, 8)}...</code></td>
+                        <td class="${tonClass}">${formatTON(tonBalance)} TON</td>
+                        <td class="${milkClass}">${formatNumber(milk)}</td>
+                        <td class="${eggsClass}">${formatNumber(eggs)}</td>
+                        <td>
+                            ${activeOrders}
+                            ${hasExcess ? `<span class="badge badge-danger" style="margin-left: 5px;">+${excessOrders}</span>` : ''}
+                        </td>
+                        <td>${excessOrders > 0 ? excessOrders : '-'}</td>
+                        <td>${reasonsHtml}</td>
+                        <td>
+                            <div class="action-buttons">
+                                <button class="action-btn view" onclick="showUserDetails('${userId}')">
+                                    <i class="fas fa-eye"></i>
+                                </button>
+                                ${hasExcess ? `
+                                    <button class="action-btn cancel" onclick="promptCancelExcess('${userId}')">
+                                        <i class="fas fa-ban"></i>
+                                    </button>
+                                ` : ''}
+                                ${isSuspicious ? `
+                                    <button class="action-btn reset" onclick="resetUser('${userId}')">
+                                        <i class="fas fa-skull-crosswalk"></i>
+                                    </button>
+                                ` : ''}
+                            </div>
+                        </td>
+                    </tr>
+                `;
+            }
+            
+            tbody.innerHTML = html;
+        }
+
+        function updateSummaryCards() {
+            // Excess Users List
+            const excessList = document.getElementById('excessUsersList');
+            if (App.excessUsers.length > 0) {
+                let html = '';
+                App.excessUsers.slice(0, 5).forEach(item => {
+                    const userName = item.user?.firstName || 'Unknown';
+                    html += `
+                        <div class="summary-item">
+                            <span>${userName} (${item.userId.substring(0, 6)}...)</span>
+                            <span class="badge badge-warning">+${item.excessCount} orders</span>
+                        </div>
+                    `;
+                });
+                excessList.innerHTML = html;
+            } else {
+                excessList.innerHTML = '<div style="text-align: center; padding: 20px;">No excess orders</div>';
+            }
+            
+            // High Balance Users
+            const balanceList = document.getElementById('highBalanceList');
+            if (App.highBalanceUsers.length > 0) {
+                let html = '';
+                App.highBalanceUsers.slice(0, 5).forEach(item => {
+                    const userName = item.user?.firstName || 'Unknown';
+                    html += `
+                        <div class="summary-item">
+                            <span>${userName}</span>
+                            <span class="badge badge-warning">${formatTON(item.balance)} TON</span>
+                        </div>
+                    `;
+                });
+                balanceList.innerHTML = html;
+            } else {
+                balanceList.innerHTML = '<div style="text-align: center; padding: 20px;">No high balance users</div>';
+            }
+            
+            // High Resources
+            const resourcesList = document.getElementById('highResourcesList');
+            const combined = [];
+            
+            App.highMilkUsers.slice(0, 3).forEach(item => {
+                combined.push({
+                    name: item.user?.firstName || 'Unknown',
+                    text: `🥛 ${formatNumber(item.milk)}`
+                });
+            });
+            
+            App.highEggsUsers.slice(0, 3).forEach(item => {
+                combined.push({
+                    name: item.user?.firstName || 'Unknown',
+                    text: `🥚 ${formatNumber(item.eggs)}`
+                });
+            });
+            
+            if (combined.length > 0) {
+                let html = '';
+                combined.forEach(item => {
+                    html += `
+                        <div class="summary-item">
+                            <span>${item.name}</span>
+                            <span class="badge badge-info">${item.text}</span>
+                        </div>
+                    `;
+                });
+                resourcesList.innerHTML = html;
+            } else {
+                resourcesList.innerHTML = '<div style="text-align: center; padding: 20px;">No high resource users</div>';
+            }
+        }
+
+        // ============================================
+        // USER DETAILS MODAL
+        // ============================================
+        window.showUserDetails = function(userId) {
+            const user = App.users[userId];
+            const userOrders = App.userOrders[userId] || [];
+            const excess = App.excessUsers.find(e => e.userId === userId);
+            
+            if (!user) return;
+            
+            const modal = document.getElementById('userModal');
+            const ordersList = document.getElementById('userOrdersList');
+            
+            const activeOrders = userOrders.filter(o => o.status === 'active');
+            
+            let html = `
+                <div style="margin-bottom: 15px;">
+                    <div style="font-size: 16px; font-weight: 600;">${user.firstName || 'Unknown'} (${userId})</div>
+                    <div style="font-size: 12px; color: rgba(255,255,255,0.5);">
+                        Active Orders: ${activeOrders.length} | 
+                        Total Orders: ${userOrders.length}
+                    </div>
+                    ${excess ? `
+                        <div style="margin-top: 10px; padding: 8px; background: rgba(255,165,0,0.2); border-radius: 8px; color: #FFA500;">
+                            ⚠️ Has ${excess.excessCount} excess order(s) (max ${THRESHOLDS.MAX_ACTIVE_ORDERS} allowed)
+                        </div>
+                    ` : ''}
+                </div>
+            `;
+            
+            if (userOrders.length === 0) {
+                html += '<div style="text-align: center; padding: 20px;">No orders found</div>';
+            } else {
+                // Sort by date (newest first)
+                userOrders.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+                
+                userOrders.forEach(order => {
+                    const date = new Date(order.createdAt).toLocaleString();
+                    const statusClass = `status-${order.status}`;
+                    const isExcess = excess && order.status === 'active' && 
+                                     activeOrders.indexOf(order) >= THRESHOLDS.MAX_ACTIVE_ORDERS;
+                    
+                    const orderClass = isExcess ? 'order-item cancelled' : 'order-item';
+                    
+                    html += `
+                        <div class="${orderClass}">
+                            <div class="order-header">
+                                <span class="order-id">${order.orderId.substring(0, 16)}...</span>
+                                <span class="order-status ${statusClass}">${order.status}</span>
+                            </div>
+                            <div class="order-details">
+                                <div><span style="color: rgba(255,255,255,0.5);">Type:</span> ${order.type}</div>
+                                <div><span style="color: rgba(255,255,255,0.5);">Resource:</span> ${order.resource === 'milk' ? '🥛' : '🥚'}</div>
+                                <div><span style="color: rgba(255,255,255,0.5);">Quantity:</span> ${formatNumber(order.quantity)}</div>
+                                <div><span style="color: rgba(255,255,255,0.5);">Remaining:</span> ${formatNumber(order.remaining)}</div>
+                                <div><span style="color: rgba(255,255,255,0.5);">Price:</span> ${formatTON(order.pricePerUnit)} TON</div>
+                                <div><span style="color: rgba(255,255,255,0.5);">Created:</span> ${date}</div>
+                            </div>
+                            ${isExcess ? '<div style="margin-top: 8px; color: #FFA500; font-size: 11px;"><i class="fas fa-exclamation-circle"></i> Excess order (will be auto-cancelled)</div>' : ''}
+                        </div>
+                    `;
+                });
+            }
+            
+            ordersList.innerHTML = html;
+            
+            document.getElementById('cancelExcessBtn').onclick = () => promptCancelExcess(userId);
+            document.getElementById('resetUserBtn').onclick = () => resetUser(userId);
+            
+            modal.classList.add('active');
+        };
+
+        window.promptCancelExcess = function(userId) {
+            const excess = App.excessUsers.find(e => e.userId === userId);
+            if (!excess) {
+                showToast('No excess orders for this user', 'error');
+                return;
+            }
+            
+            const modal = document.getElementById('cancelConfirmModal');
+            document.getElementById('cancelConfirmText').innerHTML = 
+                `Cancel ${excess.excessCount} excess order(s) for user ${userId.substring(0, 8)}...?<br>
+                <small style="color: #FFA500;">Resources will be refunded.</small>`;
+            
+            App.pendingCancel = userId;
+            modal.classList.add('active');
+        };
+
+        // ============================================
+        // UTILITY FUNCTIONS
+        // ============================================
+        function formatNumber(num) {
+            if (num === null || num === undefined) return '0';
+            if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M';
+            if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+            return num.toString();
+        }
+
+        function formatTON(amount) {
+            if (amount === null || amount === undefined || isNaN(amount)) return '0.0000';
+            return parseFloat(amount).toFixed(4);
+        }
+
+        function showProgress(show, text = 'Processing...') {
+            const container = document.getElementById('progressContainer');
+            if (show) {
+                container.style.display = 'block';
+                document.getElementById('progressText').textContent = text;
+            } else {
+                container.style.display = 'none';
+            }
+        }
+
+        function showToast(message, type = 'success') {
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            
+            setTimeout(() => {
+                toast.remove();
+            }, 3000);
+        }
+
+        // ============================================
+        // EVENT LISTENERS
+        // ============================================
+        document.getElementById('scanBtn').addEventListener('click', scanUsers);
+        document.getElementById('cancelAllExcessBtn').addEventListener('click', cancelAllExcessOrders);
+        document.getElementById('resetAllBtn').addEventListener('click', () => {
+            if (App.suspiciousUsers.length === 0) {
+                showToast('No suspicious users to reset', 'error');
+                return;
+            }
+            
+            if (!confirm(`Reset ALL ${App.suspiciousUsers.length} suspicious users?`)) {
+                return;
+            }
+            
+            (async () => {
+                for (const user of App.suspiciousUsers) {
+                    await resetUser(user.userId);
+                }
+            })();
+        });
+        
+        document.getElementById('refreshBtn').addEventListener('click', loadData);
+
+        // Modal controls
+        document.getElementById('closeModal').addEventListener('click', () => {
+            document.getElementById('userModal').classList.remove('active');
+        });
+
+        document.getElementById('closeModalBtn').addEventListener('click', () => {
+            document.getElementById('userModal').classList.remove('active');
+        });
+
+        document.getElementById('closeCancelModal').addEventListener('click', () => {
+            document.getElementById('cancelConfirmModal').classList.remove('active');
+        });
+
+        document.getElementById('cancelCancelBtn').addEventListener('click', () => {
+            document.getElementById('cancelConfirmModal').classList.remove('active');
+        });
+
+        document.getElementById('confirmCancelBtn').addEventListener('click', async () => {
+            if (App.pendingCancel) {
+                await cancelExcessOrders(App.pendingCancel);
+                document.getElementById('cancelConfirmModal').classList.remove('active');
+                App.pendingCancel = null;
+                await loadData(); // Reload to show changes
+            }
+        });
+
+        window.addEventListener('click', (e) => {
+            const modal = document.getElementById('userModal');
+            if (e.target === modal) {
+                modal.classList.remove('active');
+            }
+            
+            const cancelModal = document.getElementById('cancelConfirmModal');
+            if (e.target === cancelModal) {
+                cancelModal.classList.remove('active');
+            }
+        });
+
+        // Initialize
+        loadData();
+    </script>
+</body>
+</html>
