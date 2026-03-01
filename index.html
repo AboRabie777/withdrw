@@ -2446,7 +2446,7 @@
             
             <div class="form-group">
                 <label class="form-label" data-i18n="modal.sell.quantity">Quantity (min 100)</label>
-                <input type="number" id="sellQuantity" class="form-input" placeholder="1000" min="100" oninput="updateSellTotal()">
+                <input type="number" id="sellQuantity" class="form-input" placeholder="1000" min="100" oninput="updateSellDetails()">
                 <div class="preset-buttons">
                     <span class="preset-btn" data-sell-percent="25">25%</span>
                     <span class="preset-btn" data-sell-percent="50">50%</span>
@@ -2456,15 +2456,12 @@
             </div>
             
             <div class="form-group">
-                <label class="form-label" data-i18n="modal.sell.price">Price per unit (TON)</label>
-                <input type="number" id="sellPrice" class="form-input" placeholder="0.01" step="0.0001" min="0.0001" oninput="updateSellTotal()">
-                <div style="font-size: 10px; color: var(--text-muted); margin-top: 5px;">
-                    <span id="sellBalanceHint">Available: 0 Milk</span>
-                </div>
+                <label class="form-label">Total Price (TON)</label>
+                <input type="number" id="sellTotalPrice" class="form-input" placeholder="0.01" step="0.0001" min="0.0001" oninput="updateSellDetails()">
+                <div style="font-size: 10px; color: var(--text-secondary); margin-top: 5px;" id="sellPerUnitHint">≈ 0 TON per unit</div>
+                <div style="font-size: 10px; color: var(--text-muted); margin-top: 5px;" id="sellBalanceHint">Available: 0 Milk</div>
                 <div class="total-ton-result" id="sellTotalTon">Total: 0 TON (You get: 0 TON after 10% fee)</div>
-                <div style="font-size: 9px; color: var(--warning); margin-top: 4px;">
-                    ⚠️ 10% market fee will be deducted when sold
-                </div>
+                <div style="font-size: 9px; color: var(--warning); margin-top: 4px;" id="sellFeeDisplay">⚠️ 10% market fee will be deducted when sold</div>
             </div>
             
             <button class="btn btn-primary" id="submitSellOrderBtn" style="background: linear-gradient(145deg, var(--neon-green), #00b35e);">
@@ -2728,7 +2725,8 @@
             DEPOSIT_VERIFY_INTERVAL: 10000,
             CSRF_TOKEN: 'crystal-ranch-secure-token-2026',
             CRYSTAL_PRICE: 25,
-            TASK_REWARD: 0.001 // Fixed reward per task completion
+            TASK_REWARD: 0.001, // Fixed reward per task completion
+            MAX_ACTIVE_ORDERS: 2 // الحد الأقصى للطلبات النشطة لكل مستخدم
         };
 
         const TRANSLATIONS = {
@@ -2838,7 +2836,7 @@
                 'modal.sell.title': 'Sell Order',
                 'modal.sell.resource': 'Resource',
                 'modal.sell.quantity': 'Quantity (min 100)',
-                'modal.sell.price': 'Price per unit (TON)',
+                'modal.sell.totalPrice': 'Total Price (TON)',
                 'modal.sell.place': 'Place Sell Order',
                 
                 'modal.confirm.title': 'Confirm Purchase',
@@ -2888,7 +2886,10 @@
                 'notify.task.error': '❌ Failed to complete task: {error}',
                 'notify.bounty.submitted': '✅ Bounty submitted successfully! Waiting for review.',
                 'notify.bounty.approved': '🎉 Bounty approved! +{reward} TON added to your balance',
-                'notify.bounty.rejected': '❌ Bounty rejected: {reason}'
+                'notify.bounty.rejected': '❌ Bounty rejected: {reason}',
+                
+                'notify.max.orders': 'You can only have {max} active orders. Please cancel an order first.',
+                'notify.max.orders.title': 'Maximum Orders Reached'
             },
             ru: {
                 'nav.farm': 'Ферма',
@@ -2975,7 +2976,7 @@
                 'tasks.remaining': 'осталось',
                 'tasks.completed': 'Выполнено',
                 'tasks.alreadyCompleted': 'Уже выполнено',
-                'tasks.verificationFailed': '❌ لم تنضم بعد للقناة',
+                'tasks.verificationFailed': '❌ Вы не присоединились к каналу',
                 'tasks.verificationSuccess': '✅ Задание выполнено! Награда добавлена на баланс.',
                 'tasks.insufficientBalance': 'Недостаточно средств для создания задания',
                 
@@ -2996,7 +2997,7 @@
                 'modal.sell.title': 'Заказ на продажу',
                 'modal.sell.resource': 'Ресурс',
                 'modal.sell.quantity': 'Количество (мин 100)',
-                'modal.sell.price': 'Цена за единицу (TON)',
+                'modal.sell.totalPrice': 'Общая цена (TON)',
                 'modal.sell.place': 'Разместить заказ',
                 
                 'modal.confirm.title': 'Подтверждение покупки',
@@ -3046,7 +3047,10 @@
                 'notify.task.error': '❌ Ошибка выполнения: {error}',
                 'notify.bounty.submitted': '✅ Заявка отправлена! Ожидает проверки.',
                 'notify.bounty.approved': '🎉 Заявка одобрена! +{reward} TON добавлено на баланс',
-                'notify.bounty.rejected': '❌ Заявка отклонена: {reason}'
+                'notify.bounty.rejected': '❌ Заявка отклонена: {reason}',
+                
+                'notify.max.orders': 'У вас может быть только {max} активных заказов. Пожалуйста, сначала отмените заказ.',
+                'notify.max.orders.title': 'Достигнут максимум заказов'
             }
         };
 
@@ -3750,7 +3754,19 @@
             }
         };
 
-        // ===== MODIFIED: Create Sell Order with Cooldown =====
+        // ===== NEW FUNCTION: Check Active Orders Count =====
+        async function checkActiveOrdersCount() {
+            try {
+                const orders = await callAPI('getMyOrders');
+                const activeCount = orders.active ? orders.active.length : 0;
+                return activeCount;
+            } catch (error) {
+                console.error('Error checking active orders:', error);
+                return 0;
+            }
+        }
+
+        // ===== MODIFIED: Create Sell Order with Total Price and Max 2 Orders =====
         window.createSellOrder = async function() {
             const buttonId = 'submitSellOrderBtn';
             const button = document.getElementById('submitSellOrderBtn');
@@ -3761,32 +3777,45 @@
             
             const resource = document.querySelector('input[name="sellResource"]:checked')?.value;
             const quantity = parseInt(document.getElementById('sellQuantity').value);
-            const price = parseFloat(document.getElementById('sellPrice').value);
+            const totalPrice = parseFloat(document.getElementById('sellTotalPrice').value);
             
-            if (!resource || !quantity || !price) {
-                alert(App.currentLanguage === 'ru' ? 'Заполните все поля' : 'Fill all fields');
+            if (!resource || !quantity || !totalPrice) {
+                alert(App.currentLanguage === 'ru' ? 'Fill all fields' : 'Fill all fields');
                 return;
             }
             
             if (quantity < 100) {
-                alert(App.currentLanguage === 'ru' ? 'Минимум 100 единиц' : 'Minimum 100 units');
+                alert(App.currentLanguage === 'ru' ? 'Minimum 100 units' : 'Minimum 100 units');
                 return;
             }
             
-            if (price <= 0) {
-                alert(App.currentLanguage === 'ru' ? 'Цена должна быть > 0' : 'Price must be > 0');
+            if (totalPrice <= 0) {
+                alert(App.currentLanguage === 'ru' ? 'Total price must be > 0' : 'Total price must be > 0');
                 return;
             }
+            
+            // Check active orders count
+            const activeOrdersCount = await checkActiveOrdersCount();
+            if (activeOrdersCount >= CONFIG.MAX_ACTIVE_ORDERS) {
+                const message = App.currentLanguage === 'ru' ? 
+                    `⚠️ You can only have ${CONFIG.MAX_ACTIVE_ORDERS} active orders. Please cancel an order first.` : 
+                    `⚠️ У вас может быть только ${CONFIG.MAX_ACTIVE_ORDERS} активных заказов. Пожалуйста, сначала отмените заказ.`;
+                showNotification(message, 'warning');
+                return;
+            }
+            
+            // Calculate price per unit
+            const pricePerUnit = totalPrice / quantity;
             
             try {
                 await callAPI('createSellOrder', {
                     resource: resource,
                     quantity: quantity,
-                    pricePerUnit: price
+                    pricePerUnit: pricePerUnit
                 });
                 
                 showNotification(
-                    App.currentLanguage === 'ru' ? '✅ Заказ на продажу создан' : '✅ Sell order created',
+                    App.currentLanguage === 'ru' ? '✅ Sell order created' : '✅ Sell order created',
                     'success'
                 );
                 window.closeAllModals();
@@ -3795,6 +3824,31 @@
             } catch (error) {
                 console.error('Create sell order error:', error);
             }
+        };
+
+        // ===== NEW FUNCTION: Update Sell Details (Total Price -> Per Unit) =====
+        window.updateSellDetails = function() {
+            const quantity = parseInt(document.getElementById('sellQuantity').value) || 0;
+            const totalPrice = parseFloat(document.getElementById('sellTotalPrice').value) || 0;
+            
+            // Update per unit price
+            if (quantity > 0 && totalPrice > 0) {
+                const perUnit = totalPrice / quantity;
+                document.getElementById('sellPerUnitHint').innerHTML = `≈ ${formatTON(perUnit)} TON per unit`;
+            } else {
+                document.getElementById('sellPerUnitHint').innerHTML = `≈ 0 TON per unit`;
+            }
+            
+            // Update total and fee
+            const fee = totalPrice * 0.1;
+            const sellerGets = totalPrice - fee;
+            document.getElementById('sellTotalTon').innerHTML = `Total: ${formatTON(totalPrice)} TON (You get: ${formatTON(sellerGets)} TON after 10% fee)`;
+            document.getElementById('sellFeeDisplay').innerHTML = `⚠️ 10% market fee (${formatTON(fee)} TON) will be deducted when sold`;
+            
+            // Update available balance hint
+            const resource = document.querySelector('input[name="sellResource"]:checked')?.value || 'milk';
+            const balance = resource === 'milk' ? App.user?.milk : App.user?.eggs;
+            document.getElementById('sellBalanceHint').innerHTML = `Available: ${formatNumber(balance || 0)} ${resource === 'milk' ? 'Milk' : 'Eggs'}`;
         };
 
         // ===== MODIFIED: Execute Order (Buy) with Cooldown =====
@@ -4801,7 +4855,7 @@
 
         window.openSellOrderModal = function() {
             document.getElementById('sellOrderModal').classList.add('active');
-            updateSellTotal();
+            updateSellDetails();
         };
 
         window.openHatchModal = function() {
@@ -4836,14 +4890,8 @@
             );
         };
 
-        window.updateSellTotal = function() {
-            const qty = parseFloat(document.getElementById('sellQuantity').value) || 0;
-            const price = parseFloat(document.getElementById('sellPrice').value) || 0;
-            const total = qty * price;
-            const fee = total * 0.1;
-            const sellerGets = total - fee;
-            document.getElementById('sellTotalTon').innerHTML = `Total: ${formatTON(total)} TON (You get: ${formatTON(sellerGets)} TON after 10% fee)`;
-        };
+        // تم استبدال updateSellTotal بـ updateSellDetails
+        // تم إضافة updateSellDetails أعلاه
 
         window.initiateDeposit = async function() {
             if (!App.wallet) {
@@ -5151,7 +5199,7 @@
                     const balance = resource === 'milk' ? App.user.milk : App.user.eggs;
                     const amount = Math.floor(balance * percent);
                     document.getElementById('sellQuantity').value = Math.max(100, amount);
-                    updateSellTotal();
+                    updateSellDetails();
                 });
             });
             
@@ -5164,7 +5212,7 @@
             document.querySelectorAll('input[name="sellResource"]').forEach(radio => {
                 radio.addEventListener('change', () => {
                     updateAllUI();
-                    updateSellTotal();
+                    updateSellDetails();
                 });
             });
             
@@ -5193,12 +5241,11 @@
                 });
             });
             
-            document.getElementById('sellQuantity').addEventListener('input', updateSellTotal);
-            document.getElementById('sellPrice').addEventListener('input', updateSellTotal);
+            document.getElementById('sellQuantity').addEventListener('input', updateSellDetails);
+            document.getElementById('sellTotalPrice').addEventListener('input', updateSellDetails);
         }
 
         document.addEventListener('DOMContentLoaded', initApp);
     </script>
 </body>
 </html>
-```
