@@ -4,6 +4,8 @@
 // FIXED: ExecuteOrder now properly locks the order to prevent multiple executions
 // ADDED: Max active orders limit (2 orders per user)
 // ADDED: Total price input for sell orders
+// ADDED: Leaderboard competition system (150 TON prizes based on cow ownership)
+// FIXED: Leaderboard counter now uses global cows_sold statistic (same as main page progress bar)
 // ============================================
 
 export default {
@@ -291,20 +293,12 @@ export default {
                         result = await handleGetTasks(env, userId);
                         break;
                     
-                    case 'submitBounty':
-                        result = await handleSubmitBounty(env, userId, data);
+                    // ===== LEADERBOARD ACTIONS =====
+                    case 'getLeaderboard':
+                        result = await handleGetLeaderboard(env, userId);
                         break;
-                    case 'getUserBounties':
-                        result = await handleGetUserBounties(env, userId);
-                        break;
-                    case 'adminGetAllBounties':
-                        result = await handleAdminGetAllBounties(env, userId);
-                        break;
-                    case 'adminApproveBounty':
-                        result = await handleAdminApproveBounty(env, userId, data);
-                        break;
-                    case 'adminRejectBounty':
-                        result = await handleAdminRejectBounty(env, userId, data);
+                    case 'distributeLeaderboardPrizes':
+                        result = await handleDistributeLeaderboardPrizes(env, userId);
                         break;
                     
                     default:
@@ -453,12 +447,34 @@ const GAME_CONSTANTS = {
     MIN_TASK_TARGET: 100,
     MAX_TASK_DURATION_DAYS: 30,
     
-    BOUNTY_MIN_REWARD: 1,
-    BOUNTY_MAX_REWARD: 50,
-    BOUNTY_MIN_FOLLOWERS: 500,
-    
     MAX_RETRY_ATTEMPTS: 3,
-    RETRY_DELAY_MS: 100
+    RETRY_DELAY_MS: 100,
+    
+    // ===== LEADERBOARD CONSTANTS =====
+    LEADERBOARD_COW_CAP: 1000,
+    LEADERBOARD_TOTAL_PRIZE: 150,
+    LEADERBOARD_PRIZES: {
+        1: 50,
+        2: 20,
+        3: 15,
+        4: 10,
+        5: 8,
+        6: 7,
+        7: 6,
+        8: 5,
+        9: 4,
+        10: 3,
+        11: 2,
+        12: 2,
+        13: 2,
+        14: 2,
+        15: 2,
+        16: 2,
+        17: 2,
+        18: 2,
+        19: 2,
+        20: 2
+    }
 };
 
 const PARTNER_TASKS = [
@@ -491,6 +507,284 @@ const PARTNER_TASKS = [
 ];
 
 const ADMIN_IDS = ['123456789', '987654321'];
+
+// ============================================
+// LEADERBOARD FUNCTIONS - FIXED TO USE GLOBAL COW SALES
+// ============================================
+
+async function initializeLeaderboard(env) {
+    try {
+        const leaderboardResult = await dbGet(env, 'leaderboard');
+        
+        if (!leaderboardResult.success || !leaderboardResult.data) {
+            const now = Date.now();
+            await dbSet(env, 'leaderboard', {
+                isActive: true,
+                endedAt: null,
+                prizesDistributed: false,
+                lastUpdated: now,
+                createdAt: now
+            });
+        }
+        
+        const winnersResult = await dbGet(env, 'leaderboard_winners');
+        if (!winnersResult.success || !winnersResult.data) {
+            await dbSet(env, 'leaderboard_winners', {});
+        }
+        
+    } catch (error) {
+        console.error('Initialize leaderboard error:', error);
+    }
+}
+
+async function updateLeaderboard(env, userId, oldCowCount, newCowCount) {
+    try {
+        const leaderboardResult = await dbGet(env, 'leaderboard');
+        if (!leaderboardResult.success || !leaderboardResult.data) {
+            await initializeLeaderboard(env);
+        }
+        
+        const leaderboard = leaderboardResult.data || { isActive: true };
+        
+        if (!leaderboard.isActive) {
+            return null;
+        }
+        
+        const cowsResult = await dbGet(env, 'leaderboard_cows');
+        let cowsData = cowsResult.success ? cowsResult.data || {} : {};
+        
+        const now = Date.now();
+        const currentCowCount = newCowCount;
+        const previousCowCount = oldCowCount;
+        
+        const userRecord = cowsData[userId] || {
+            userId: userId,
+            cowCount: 0,
+            achievedAt: now,
+            firstName: '',
+            lastName: '',
+            username: ''
+        };
+        
+        const userResult = await dbGet(env, `users/${userId}`);
+        if (userResult.success && userResult.data) {
+            userRecord.firstName = userResult.data.firstName || '';
+            userRecord.lastName = userResult.data.lastName || '';
+            userRecord.username = userResult.data.username || '';
+        }
+        
+        if (currentCowCount > previousCowCount) {
+            userRecord.cowCount = currentCowCount;
+            userRecord.achievedAt = now;
+            
+            await dbSet(env, `leaderboard_cows/${userId}`, userRecord);
+            
+            // تحديث وقت آخر تحديث فقط، لا نعدل totalCowSales هنا
+            await dbUpdate(env, 'leaderboard', {
+                lastUpdated: now
+            });
+        }
+        
+        return userRecord;
+        
+    } catch (error) {
+        console.error('Update leaderboard error:', error);
+        return null;
+    }
+}
+
+async function getLeaderboardData(env, currentUserId) {
+    try {
+        await initializeLeaderboard(env);
+        
+        const leaderboardResult = await dbGet(env, 'leaderboard');
+        const cowsResult = await dbGet(env, 'leaderboard_cows');
+        const globalResult = await dbGet(env, 'global'); // نجلب البيانات العالمية
+        
+        let leaderboard = leaderboardResult.data || { 
+            isActive: true, 
+            prizesDistributed: false 
+        };
+        let cowsData = cowsResult.success ? cowsResult.data || {} : {};
+        let global = globalResult.success ? globalResult.data : { cows_sold: 0 }; // نأخذ cows_sold من global
+        
+        // نستخدم cows_sold من global بدلاً من leaderboard.totalCowSales
+        const totalCowSales = global.cows_sold || 0;
+        
+        const usersArray = Object.values(cowsData);
+        
+        usersArray.sort((a, b) => {
+            if (b.cowCount !== a.cowCount) {
+                return b.cowCount - a.cowCount;
+            }
+            return (a.achievedAt || 0) - (b.achievedAt || 0);
+        });
+        
+        const rankedUsers = usersArray.map((user, index) => ({
+            rank: index + 1,
+            userId: user.userId,
+            firstName: user.firstName || '',
+            lastName: user.lastName || '',
+            username: user.username || '',
+            cowCount: user.cowCount || 0,
+            points: user.cowCount || 0,
+            prize: leaderboard.isActive ? 
+                (index < 20 ? GAME_CONSTANTS.LEADERBOARD_PRIZES[index + 1] || 0 : 0) : 
+                (user.prizeAwarded || 0)
+        }));
+        
+        const currentUserEntry = rankedUsers.find(u => u.userId === currentUserId) || {
+            rank: rankedUsers.length + 1,
+            cowCount: 0,
+            points: 0,
+            prize: 0
+        };
+        
+        const winnersResult = await dbGet(env, 'leaderboard_winners');
+        const winners = winnersResult.success ? winnersResult.data || {} : {};
+        
+        return {
+            success: true,
+            data: {
+                isActive: leaderboard.isActive,
+                totalCowSales: totalCowSales, // الآن يستخدم global.cows_sold
+                cowCap: GAME_CONSTANTS.LEADERBOARD_COW_CAP,
+                remainingCows: Math.max(0, GAME_CONSTANTS.LEADERBOARD_COW_CAP - totalCowSales),
+                leaderboard: rankedUsers.slice(0, 100),
+                currentUser: currentUserEntry,
+                prizesDistributed: leaderboard.prizesDistributed || false,
+                winners: winners
+            }
+        };
+        
+    } catch (error) {
+        console.error('Get leaderboard error:', error);
+        return {
+            success: false,
+            error: error.message,
+            errorCode: 'LEADERBOARD_ERROR'
+        };
+    }
+}
+
+async function finalizeLeaderboard(env) {
+    try {
+        const leaderboardResult = await dbGet(env, 'leaderboard');
+        const cowsResult = await dbGet(env, 'leaderboard_cows');
+        const globalResult = await dbGet(env, 'global');
+        
+        if (!leaderboardResult.success || !leaderboardResult.data) {
+            return null;
+        }
+        
+        const leaderboard = leaderboardResult.data;
+        
+        if (!leaderboard.isActive || leaderboard.prizesDistributed) {
+            return leaderboard;
+        }
+        
+        let cowsData = cowsResult.success ? cowsResult.data || {} : {};
+        let global = globalResult.success ? globalResult.data : { cows_sold: 0 };
+        
+        const usersArray = Object.values(cowsData);
+        
+        usersArray.sort((a, b) => {
+            if (b.cowCount !== a.cowCount) {
+                return b.cowCount - a.cowCount;
+            }
+            return (a.achievedAt || 0) - (b.achievedAt || 0);
+        });
+        
+        const winners = {};
+        const now = Date.now();
+        
+        for (let i = 0; i < Math.min(20, usersArray.length); i++) {
+            const user = usersArray[i];
+            const rank = i + 1;
+            const prize = GAME_CONSTANTS.LEADERBOARD_PRIZES[rank] || 0;
+            
+            if (prize > 0) {
+                winners[user.userId] = {
+                    rank: rank,
+                    prize: prize,
+                    cowCount: user.cowCount,
+                    awardedAt: now
+                };
+                
+                const userResult = await dbGet(env, `users/${user.userId}`);
+                if (userResult.success && userResult.data) {
+                    const currentTon = parseFloat(userResult.data.tonBalance || 0);
+                    await atomicUpdateUserResource(env, user.userId, 'tonBalance', -prize);
+                    
+                    await dbPush(env, `users/${user.userId}/transactions`, {
+                        type: 'leaderboard_prize',
+                        rank: rank,
+                        amount: prize,
+                        timestamp: now
+                    });
+                }
+            }
+        }
+        
+        await dbSet(env, 'leaderboard_winners', winners);
+        
+        await dbUpdate(env, 'leaderboard', {
+            isActive: false,
+            prizesDistributed: true,
+            endedAt: now,
+            winners: winners,
+            lastUpdated: now
+        });
+        
+        return {
+            winners: winners,
+            finalizedAt: now
+        };
+        
+    } catch (error) {
+        console.error('Finalize leaderboard error:', error);
+        return null;
+    }
+}
+
+async function handleGetLeaderboard(env, userId) {
+    return await getLeaderboardData(env, userId);
+}
+
+async function handleDistributeLeaderboardPrizes(env, userId) {
+    if (!ADMIN_IDS.includes(userId)) {
+        return {
+            success: false,
+            error: 'Unauthorized',
+            errorCode: 'UNAUTHORIZED'
+        };
+    }
+    
+    try {
+        const result = await finalizeLeaderboard(env);
+        
+        if (!result) {
+            return {
+                success: false,
+                error: 'Failed to finalize leaderboard',
+                errorCode: 'FINALIZE_FAILED'
+            };
+        }
+        
+        return {
+            success: true,
+            data: result
+        };
+        
+    } catch (error) {
+        console.error('Distribute prizes error:', error);
+        return {
+            success: false,
+            error: error.message,
+            errorCode: 'DISTRIBUTE_ERROR'
+        };
+    }
+}
 
 // ============================================
 // CHECK MAX ACTIVE ORDERS (LIMIT 2)
@@ -1085,24 +1379,6 @@ async function notifyTaskCreated(env, userId, taskType, targetUsers, totalCost) 
     await sendTelegramNotification(env, userId, message);
 }
 
-async function notifyBountySubmitted(env, userId, bountyId) {
-    const message = `🎁 <b>Bounty Submitted!</b>\n\nYour bounty request has been submitted successfully!\n\n📋 ID: ${bountyId.substring(0, 8)}\n⏳ Status: Pending Review\n\nWe'll notify you once it's reviewed (1-3 days).`;
-    
-    await sendTelegramNotification(env, userId, message);
-}
-
-async function notifyBountyApproved(env, userId, reward) {
-    const message = `🎉 <b>Bounty Approved!</b>\n\nYour bounty request has been approved!\n\n💰 Reward: ${formatTON(reward)} TON added to your balance.\n\nThank you for promoting Crystal Ranch! 🚀`;
-    
-    await sendTelegramNotification(env, userId, message);
-}
-
-async function notifyBountyRejected(env, userId, reason) {
-    const message = `❌ <b>Bounty Rejected</b>\n\nYour bounty request has been rejected.\n\nReason: ${reason || 'Not specified'}\n\nPlease check the terms and submit a new request.`;
-    
-    await sendTelegramNotification(env, userId, message);
-}
-
 function formatNumber(num) {
     if (num === null || num === undefined) return '0';
     if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M';
@@ -1460,6 +1736,9 @@ async function handleBuyCow(env, userId, data) {
             
             await dbUpdate(env, `users/${userId}`, userUpdates);
             await dbUpdate(env, 'global', globalUpdates);
+            
+            // Update leaderboard
+            await updateLeaderboard(env, userId, user.cows_owned || 0, (user.cows_owned || 0) + buyQuantity);
             
             let referralCommission = 0;
             if (user.referredBy && (user.cows_owned === 0)) {
@@ -1926,6 +2205,9 @@ async function handleHatchCow(env, userId, data) {
             };
             
             await dbUpdate(env, `users/${userId}`, userUpdates);
+            
+            // Update leaderboard for hatched cows
+            await updateLeaderboard(env, userId, user.cows_owned || 0, (user.cows_owned || 0) + hatchAmount);
             
             await dbPush(env, `users/${userId}/transactions`, {
                 type: 'hatch_cow',
@@ -2789,7 +3071,6 @@ async function handleExecuteOrder(env, userId, data) {
         try {
             const { orderId, quantity } = data;
             
-            // 1️⃣ أولاً: نجلب الطلب ونتأكد من وجوده
             const orderResult = await dbGet(env, `orders/${orderId}`);
             if (!orderResult.success || !orderResult.data) {
                 return {
@@ -2801,7 +3082,6 @@ async function handleExecuteOrder(env, userId, data) {
             
             const order = orderResult.data;
             
-            // 2️⃣ نتحقق من أن الطلب لا يزال active
             if (order.status !== 'active') {
                 return {
                     success: false,
@@ -2827,7 +3107,6 @@ async function handleExecuteOrder(env, userId, data) {
                 };
             }
             
-            // 3️⃣ نحدد المشتري والبائع
             let buyerId, sellerId;
             if (order.type === 'sell') {
                 buyerId = userId;
@@ -2837,17 +3116,11 @@ async function handleExecuteOrder(env, userId, data) {
                 sellerId = userId;
             }
             
-            // 4️⃣ نحسب المبالغ
             const totalCost = executeQuantity * order.pricePerUnit;
             const fee = order.type === 'sell' ? totalCost * (GAME_CONSTANTS.MARKET_FEE_PERCENT / 100) : 0;
             const sellerReceives = order.type === 'sell' ? totalCost - fee : totalCost;
             
-            // ========== تنفيذ العملية بشكل ذري مع قفل الطلب ==========
-            
             if (order.type === 'sell') {
-                // === حالة طلب بيع: المشتري يدفع، البائع يستلم ===
-                
-                // 1️⃣ نخصم TON من المشتري (Atomic)
                 const buyerTonUpdate = await atomicUpdateUserResource(
                     env, buyerId, 'tonBalance', totalCost
                 );
@@ -2874,13 +3147,11 @@ async function handleExecuteOrder(env, userId, data) {
                     };
                 }
                 
-                // 2️⃣ نضيف الموارد للمشتري (Atomic)
                 const buyerResourceUpdate = await atomicUpdateUserResource(
                     env, buyerId, order.resource, -executeQuantity
                 );
                 
                 if (!buyerResourceUpdate.success) {
-                    // Rollback: نعيد TON للمشتري
                     await atomicUpdateUserResource(env, buyerId, 'tonBalance', -totalCost);
                     
                     if (buyerResourceUpdate.errorCode === 'RACE_CONDITION_DETECTED') {
@@ -2898,13 +3169,11 @@ async function handleExecuteOrder(env, userId, data) {
                     };
                 }
                 
-                // 3️⃣ نضيف TON للبائع (Atomic)
                 const sellerTonUpdate = await atomicUpdateUserResource(
                     env, sellerId, 'tonBalance', -sellerReceives
                 );
                 
                 if (!sellerTonUpdate.success) {
-                    // Rollback: نسترجع TON من المشتري ونسترجع الموارد
                     await atomicUpdateUserResource(env, buyerId, 'tonBalance', -totalCost);
                     await atomicUpdateUserResource(env, buyerId, order.resource, executeQuantity);
                     
@@ -2924,9 +3193,6 @@ async function handleExecuteOrder(env, userId, data) {
                 }
                 
             } else {
-                // === حالة طلب شراء: البائع يبيع، المشتري يشتري ===
-                
-                // 1️⃣ نخصم الموارد من البائع (Atomic)
                 const sellerResourceUpdate = await atomicUpdateUserResource(
                     env, sellerId, order.resource, executeQuantity
                 );
@@ -2953,13 +3219,11 @@ async function handleExecuteOrder(env, userId, data) {
                     };
                 }
                 
-                // 2️⃣ نضيف TON للبائع (Atomic)
                 const sellerTonUpdate = await atomicUpdateUserResource(
                     env, sellerId, 'tonBalance', -totalCost
                 );
                 
                 if (!sellerTonUpdate.success) {
-                    // Rollback: نسترجع الموارد من البائع
                     await atomicUpdateUserResource(env, sellerId, order.resource, -executeQuantity);
                     
                     if (sellerTonUpdate.errorCode === 'RACE_CONDITION_DETECTED') {
@@ -2977,13 +3241,11 @@ async function handleExecuteOrder(env, userId, data) {
                     };
                 }
                 
-                // 3️⃣ نضيف الموارد للمشتري (Atomic)
                 const buyerResourceUpdate = await atomicUpdateUserResource(
                     env, buyerId, order.resource, -executeQuantity
                 );
                 
                 if (!buyerResourceUpdate.success) {
-                    // Rollback كامل: نسترجع كل شيء
                     await atomicUpdateUserResource(env, sellerId, order.resource, executeQuantity);
                     await atomicUpdateUserResource(env, sellerId, 'tonBalance', totalCost);
                     
@@ -3003,13 +3265,8 @@ async function handleExecuteOrder(env, userId, data) {
                 }
             }
             
-            // 5️⃣ ✅ الآن نحدث الطلب - هذه هي الخطوة الأهم
-            // نحتاج للتأكد أن الطلب لم يتغير أثناء تنفيذ العمليات السابقة
-            
-            // نجلب الطلب مرة أخرى للتأكد من حالته
             const finalOrderCheck = await dbGet(env, `orders/${orderId}`);
             if (!finalOrderCheck.success || !finalOrderCheck.data) {
-                // هذا خطأ غريب، نعمل Rollback
                 await rollbackExecuteOrder(env, buyerId, sellerId, order, executeQuantity, totalCost, sellerReceives, fee);
                 return {
                     success: false,
@@ -3020,7 +3277,6 @@ async function handleExecuteOrder(env, userId, data) {
             
             const finalOrder = finalOrderCheck.data;
             
-            // إذا لم يعد الطلب active، هذا يعني أن عملية أخرى نفذته
             if (finalOrder.status !== 'active') {
                 await rollbackExecuteOrder(env, buyerId, sellerId, order, executeQuantity, totalCost, sellerReceives, fee);
                 return {
@@ -3030,7 +3286,6 @@ async function handleExecuteOrder(env, userId, data) {
                 };
             }
             
-            // إذا تغيرت الكمية المتبقية، هذا يعني أن عملية أخرى تشتغل عليه
             if (finalOrder.remaining !== order.remaining) {
                 await rollbackExecuteOrder(env, buyerId, sellerId, order, executeQuantity, totalCost, sellerReceives, fee);
                 return {
@@ -3040,7 +3295,6 @@ async function handleExecuteOrder(env, userId, data) {
                 };
             }
             
-            // الآن نحدث الطلب
             const newRemaining = finalOrder.remaining - executeQuantity;
             const orderStatus = newRemaining <= 0 ? 'filled' : 'active';
             
@@ -3050,11 +3304,9 @@ async function handleExecuteOrder(env, userId, data) {
                 updatedAt: Date.now()
             };
             
-            // نستخدم dbUpdate العادي لأننا تأكدنا من الحالة
             await dbUpdate(env, `orders/${orderId}`, orderUpdates);
             await dbUpdate(env, `users/${order.userId}/orders/${orderId}`, orderUpdates);
             
-            // 6️⃣ نسجل المعاملة
             const txId = `tx_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
             
             await dbPush(env, `users/${buyerId}/transactions`, {
@@ -3082,7 +3334,6 @@ async function handleExecuteOrder(env, userId, data) {
                 timestamp: Date.now()
             });
             
-            // 7️⃣ نرسل إشعار
             await notifyOrderFilled(env, order.userId, order, executeQuantity, totalCost, fee);
             
             return {
@@ -3132,12 +3383,10 @@ async function rollbackExecuteOrder(env, buyerId, sellerId, order, quantity, tot
     
     try {
         if (order.type === 'sell') {
-            // Rollback لطلب بيع
             await atomicUpdateUserResource(env, buyerId, 'tonBalance', -totalCost);
             await atomicUpdateUserResource(env, buyerId, order.resource, quantity);
             await atomicUpdateUserResource(env, sellerId, 'tonBalance', sellerReceives);
         } else {
-            // Rollback لطلب شراء
             await atomicUpdateUserResource(env, sellerId, order.resource, -quantity);
             await atomicUpdateUserResource(env, sellerId, 'tonBalance', totalCost);
             await atomicUpdateUserResource(env, buyerId, order.resource, quantity);
@@ -3145,7 +3394,6 @@ async function rollbackExecuteOrder(env, buyerId, sellerId, order, quantity, tot
         console.log('Rollback completed successfully');
     } catch (rollbackError) {
         console.error('CRITICAL: Rollback failed!', rollbackError);
-        // هنا يجب إرسال تنبيه للمشرفين
     }
 }
 
@@ -4312,385 +4560,6 @@ async function handleGetTasks(env, userId) {
 }
 
 // ============================================
-// BOUNTY SYSTEM - FIXED WITH ATOMIC UPDATES
-// ============================================
-
-async function handleSubmitBounty(env, userId, data) {
-    try {
-        const { link, platform } = data;
-        
-        if (!link || !link.includes('t.me/') && !link.includes('youtube.com') && !link.includes('facebook.com') && !link.includes('twitter.com') && !link.includes('x.com')) {
-            return {
-                success: false,
-                error: 'Valid social media link is required',
-                errorCode: 'INVALID_LINK'
-            };
-        }
-        
-        if (!platform || !['telegram', 'youtube', 'facebook', 'twitter'].includes(platform)) {
-            return {
-                success: false,
-                error: 'Invalid platform',
-                errorCode: 'INVALID_PLATFORM'
-            };
-        }
-        
-        const bountiesResult = await dbGet(env, 'bounties');
-        if (bountiesResult.success && bountiesResult.data) {
-            const existing = Object.values(bountiesResult.data).find(b => b.link === link);
-            if (existing) {
-                return {
-                    success: false,
-                    error: 'This link has already been submitted',
-                    errorCode: 'DUPLICATE_LINK'
-                };
-            }
-        }
-        
-        const now = Date.now();
-        const bountyId = `bounty_${now}_${Math.random().toString(36).substring(2, 10)}`;
-        
-        const bountyData = {
-            id: bountyId,
-            userId: userId,
-            link: link,
-            platform: platform,
-            status: 'pending',
-            reward: null,
-            rejectReason: null,
-            createdAt: now,
-            updatedAt: now
-        };
-        
-        await dbSet(env, `bounties/${bountyId}`, bountyData);
-        await dbSet(env, `users/${userId}/bounties/${bountyId}`, bountyData);
-        
-        await notifyBountySubmitted(env, userId, bountyId);
-        
-        return {
-            success: true,
-            data: {
-                bountyId: bountyId,
-                status: 'pending',
-                message: 'Bounty submitted successfully'
-            }
-        };
-        
-    } catch (error) {
-        console.error('Submit bounty error:', error);
-        return {
-            success: false,
-            error: error.message,
-            errorCode: 'SUBMIT_BOUNTY_ERROR'
-        };
-    }
-}
-
-async function handleGetUserBounties(env, userId) {
-    try {
-        const bountiesResult = await dbGet(env, `users/${userId}/bounties`);
-        
-        if (!bountiesResult.success || !bountiesResult.data) {
-            return {
-                success: true,
-                data: []
-            };
-        }
-        
-        const bounties = Object.values(bountiesResult.data)
-            .sort((a, b) => b.createdAt - a.createdAt);
-        
-        return {
-            success: true,
-            data: bounties
-        };
-        
-    } catch (error) {
-        console.error('Get user bounties error:', error);
-        return {
-            success: false,
-            error: error.message,
-            errorCode: 'GET_USER_BOUNTIES_ERROR'
-        };
-    }
-}
-
-async function handleAdminGetAllBounties(env, userId) {
-    try {
-        if (!ADMIN_IDS.includes(userId)) {
-            return {
-                success: false,
-                error: 'Unauthorized',
-                errorCode: 'UNAUTHORIZED'
-            };
-        }
-        
-        const bountiesResult = await dbGet(env, 'bounties');
-        
-        if (!bountiesResult.success || !bountiesResult.data) {
-            return {
-                success: true,
-                data: []
-            };
-        }
-        
-        const bounties = Object.values(bountiesResult.data)
-            .sort((a, b) => b.createdAt - a.createdAt);
-        
-        const bountiesWithUser = [];
-        for (const bounty of bounties) {
-            const userResult = await dbGet(env, `users/${bounty.userId}`);
-            const user = userResult.success ? userResult.data : null;
-            
-            bountiesWithUser.push({
-                ...bounty,
-                userName: user ? `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.username || bounty.userId.substring(0, 6) : bounty.userId
-            });
-        }
-        
-        return {
-            success: true,
-            data: bountiesWithUser
-        };
-        
-    } catch (error) {
-        console.error('Admin get bounties error:', error);
-        return {
-            success: false,
-            error: error.message,
-            errorCode: 'ADMIN_GET_BOUNTIES_ERROR'
-        };
-    }
-}
-
-async function handleAdminApproveBounty(env, userId, data) {
-    let attempt = 0;
-    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
-    
-    while (attempt < maxAttempts) {
-        try {
-            if (!ADMIN_IDS.includes(userId)) {
-                return {
-                    success: false,
-                    error: 'Unauthorized',
-                    errorCode: 'UNAUTHORIZED'
-                };
-            }
-            
-            const { bountyId, reward } = data;
-            
-            if (!bountyId) {
-                return {
-                    success: false,
-                    error: 'Bounty ID required',
-                    errorCode: 'INVALID_BOUNTY_ID'
-                };
-            }
-            
-            const rewardAmount = parseFloat(reward);
-            if (!rewardAmount || rewardAmount < GAME_CONSTANTS.BOUNTY_MIN_REWARD || rewardAmount > GAME_CONSTANTS.BOUNTY_MAX_REWARD) {
-                return {
-                    success: false,
-                    error: `Reward must be between ${GAME_CONSTANTS.BOUNTY_MIN_REWARD} and ${GAME_CONSTANTS.BOUNTY_MAX_REWARD} TON`,
-                    errorCode: 'INVALID_REWARD'
-                };
-            }
-            
-            const bountyResult = await dbGet(env, `bounties/${bountyId}`);
-            
-            if (!bountyResult.success || !bountyResult.data) {
-                return {
-                    success: false,
-                    error: 'Bounty not found',
-                    errorCode: 'BOUNTY_NOT_FOUND'
-                };
-            }
-            
-            const bounty = bountyResult.data;
-            
-            if (bounty.status !== 'pending') {
-                return {
-                    success: false,
-                    error: `Bounty is already ${bounty.status}`,
-                    errorCode: 'BOUNTY_ALREADY_PROCESSED'
-                };
-            }
-            
-            const userResult = await dbGet(env, `users/${bounty.userId}`);
-            if (!userResult.success || !userResult.data) {
-                return {
-                    success: false,
-                    error: 'User not found',
-                    errorCode: 'USER_NOT_FOUND'
-                };
-            }
-            
-            let user = userResult.data;
-            
-            const now = Date.now();
-            
-            await dbUpdate(env, `bounties/${bountyId}`, {
-                status: 'approved',
-                reward: rewardAmount,
-                reviewedAt: now,
-                updatedAt: now
-            });
-            
-            await dbUpdate(env, `users/${bounty.userId}/bounties/${bountyId}`, {
-                status: 'approved',
-                reward: rewardAmount,
-                reviewedAt: now,
-                updatedAt: now
-            });
-            
-            const atomicResult = await atomicUpdateUserResource(
-                env,
-                bounty.userId,
-                'tonBalance',
-                -rewardAmount
-            );
-            
-            if (!atomicResult.success) {
-                if (atomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
-                    attempt++;
-                    if (attempt < maxAttempts) {
-                        console.log(`Race condition detected for user ${bounty.userId} (approveBounty), retry attempt ${attempt}/${maxAttempts}`);
-                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
-                        continue;
-                    } else {
-                        return {
-                            success: false,
-                            error: 'System busy, please try again',
-                            errorCode: 'RACE_CONDITION_MAX_RETRIES'
-                        };
-                    }
-                } else {
-                    return {
-                        success: false,
-                        error: atomicResult.error,
-                        errorCode: atomicResult.errorCode || 'ATOMIC_UPDATE_FAILED'
-                    };
-                }
-            }
-            
-            await dbPush(env, `users/${bounty.userId}/transactions`, {
-                type: 'bounty_reward',
-                bountyId: bountyId,
-                amount: rewardAmount,
-                timestamp: now
-            });
-            
-            await notifyBountyApproved(env, bounty.userId, rewardAmount);
-            
-            return {
-                success: true,
-                data: {
-                    bountyId: bountyId,
-                    status: 'approved',
-                    reward: rewardAmount
-                }
-            };
-            
-        } catch (error) {
-            console.error(`Admin approve bounty error (attempt ${attempt + 1}):`, error);
-            attempt++;
-            if (attempt < maxAttempts) {
-                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
-            } else {
-                return {
-                    success: false,
-                    error: error.message,
-                    errorCode: 'ADMIN_APPROVE_BOUNTY_ERROR'
-                };
-            }
-        }
-    }
-    
-    return {
-        success: false,
-        error: 'Maximum retry attempts exceeded',
-        errorCode: 'MAX_RETRIES_EXCEEDED'
-    };
-}
-
-async function handleAdminRejectBounty(env, userId, data) {
-    try {
-        if (!ADMIN_IDS.includes(userId)) {
-            return {
-                success: false,
-                error: 'Unauthorized',
-                errorCode: 'UNAUTHORIZED'
-            };
-        }
-        
-        const { bountyId, reason } = data;
-        
-        if (!bountyId) {
-            return {
-                success: false,
-                error: 'Bounty ID required',
-                errorCode: 'INVALID_BOUNTY_ID'
-            };
-        }
-        
-        const bountyResult = await dbGet(env, `bounties/${bountyId}`);
-        
-        if (!bountyResult.success || !bountyResult.data) {
-            return {
-                success: false,
-                error: 'Bounty not found',
-                errorCode: 'BOUNTY_NOT_FOUND'
-            };
-        }
-        
-        const bounty = bountyResult.data;
-        
-        if (bounty.status !== 'pending') {
-            return {
-                success: false,
-                error: `Bounty is already ${bounty.status}`,
-                errorCode: 'BOUNTY_ALREADY_PROCESSED'
-            };
-        }
-        
-        const now = Date.now();
-        
-        await dbUpdate(env, `bounties/${bountyId}`, {
-            status: 'rejected',
-            rejectReason: reason || 'Not meeting requirements',
-            reviewedAt: now,
-            updatedAt: now
-        });
-        
-        await dbUpdate(env, `users/${bounty.userId}/bounties/${bountyId}`, {
-            status: 'rejected',
-            rejectReason: reason || 'Not meeting requirements',
-            reviewedAt: now,
-            updatedAt: now
-        });
-        
-        await notifyBountyRejected(env, bounty.userId, reason);
-        
-        return {
-            success: true,
-            data: {
-                bountyId: bountyId,
-                status: 'rejected',
-                reason: reason
-            }
-        };
-        
-    } catch (error) {
-        console.error('Admin reject bounty error:', error);
-        return {
-            success: false,
-            error: error.message,
-            errorCode: 'ADMIN_REJECT_BOUNTY_ERROR'
-        };
-    }
-}
-
-// ============================================
 // INITIALIZATION HANDLER
 // ============================================
 
@@ -4986,8 +4855,18 @@ async function handleGetState(env, userId) {
         const tasksResult = await handleGetTasks(env, userId);
         let tasks = tasksResult.success ? tasksResult.data : { partner: [], community: [] };
         
-        const bountiesResult = await handleGetUserBounties(env, userId);
-        let bounties = bountiesResult.success ? bountiesResult.data : [];
+        // ===== Get Leaderboard Data with Global Cow Sales =====
+        const leaderboardResult = await getLeaderboardData(env, userId);
+        const leaderboard = leaderboardResult.success ? leaderboardResult.data : {
+            isActive: true,
+            totalCowSales: global.cows_sold || 0, // استخدام cows_sold من global
+            cowCap: GAME_CONSTANTS.LEADERBOARD_COW_CAP,
+            remainingCows: Math.max(0, GAME_CONSTANTS.LEADERBOARD_COW_CAP - (global.cows_sold || 0)),
+            leaderboard: [],
+            currentUser: { rank: 0, cowCount: 0, points: 0, prize: 0 },
+            prizesDistributed: false,
+            winners: {}
+        };
         
         const milkPerHour = (user.cows_owned || 0) * GAME_CONSTANTS.COW_PRODUCTION_RATE;
         const eggsPerHour = (user.chickens_owned || 0) * GAME_CONSTANTS.CHICKEN_PRODUCTION_RATE;
@@ -5077,20 +4956,22 @@ async function handleGetState(env, userId) {
                     MARKET_FEE_PERCENT: GAME_CONSTANTS.MARKET_FEE_PERCENT,
                     TASK_REWARD: GAME_CONSTANTS.TASK_REWARD,
                     
-                    BOUNTY_MIN_REWARD: GAME_CONSTANTS.BOUNTY_MIN_REWARD,
-                    BOUNTY_MAX_REWARD: GAME_CONSTANTS.BOUNTY_MAX_REWARD,
-                    BOUNTY_MIN_FOLLOWERS: GAME_CONSTANTS.BOUNTY_MIN_FOLLOWERS,
                     MIN_TASK_TARGET: GAME_CONSTANTS.MIN_TASK_TARGET,
                     
                     MAX_RETRY_ATTEMPTS: GAME_CONSTANTS.MAX_RETRY_ATTEMPTS,
-                    MAX_ACTIVE_ORDERS: GAME_CONSTANTS.MAX_ACTIVE_ORDERS
+                    MAX_ACTIVE_ORDERS: GAME_CONSTANTS.MAX_ACTIVE_ORDERS,
+                    
+                    // Leaderboard constants
+                    LEADERBOARD_COW_CAP: GAME_CONSTANTS.LEADERBOARD_COW_CAP,
+                    LEADERBOARD_TOTAL_PRIZE: GAME_CONSTANTS.LEADERBOARD_TOTAL_PRIZE,
+                    LEADERBOARD_PRIZES: GAME_CONSTANTS.LEADERBOARD_PRIZES
                 },
                 
                 referral: referralStats,
                 market: marketStats,
                 tasks: tasks,
-                bounties: bounties,
-                pendingDeposits: pendingDeposits
+                pendingDeposits: pendingDeposits,
+                leaderboard: leaderboard
             }
         };
         
