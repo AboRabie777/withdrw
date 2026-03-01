@@ -6,6 +6,7 @@
 // ADDED: Total price input for sell orders
 // ADDED: Leaderboard competition system (150 TON prizes based on cow ownership)
 // FIXED: Leaderboard counter now uses global cows_sold statistic (same as main page progress bar)
+// UPDATED: Leaderboard prizes distribution (40,30,20,10,8,6,5,4,3,3,2,2,2,2,2,2,2,2,2,1)
 // ============================================
 
 export default {
@@ -450,19 +451,19 @@ const GAME_CONSTANTS = {
     MAX_RETRY_ATTEMPTS: 3,
     RETRY_DELAY_MS: 100,
     
-    // ===== LEADERBOARD CONSTANTS =====
+    // ===== LEADERBOARD CONSTANTS - UPDATED PRIZES =====
     LEADERBOARD_COW_CAP: 1000,
     LEADERBOARD_TOTAL_PRIZE: 150,
     LEADERBOARD_PRIZES: {
-        1: 50,
-        2: 20,
-        3: 15,
+        1: 40,
+        2: 30,
+        3: 20,
         4: 10,
         5: 8,
-        6: 7,
-        7: 6,
-        8: 5,
-        9: 4,
+        6: 6,
+        7: 5,
+        8: 4,
+        9: 3,
         10: 3,
         11: 2,
         12: 2,
@@ -473,7 +474,7 @@ const GAME_CONSTANTS = {
         17: 2,
         18: 2,
         19: 2,
-        20: 2
+        20: 1
     }
 };
 
@@ -563,7 +564,8 @@ async function updateLeaderboard(env, userId, oldCowCount, newCowCount) {
             achievedAt: now,
             firstName: '',
             lastName: '',
-            username: ''
+            username: '',
+            photoUrl: ''
         };
         
         const userResult = await dbGet(env, `users/${userId}`);
@@ -571,6 +573,7 @@ async function updateLeaderboard(env, userId, oldCowCount, newCowCount) {
             userRecord.firstName = userResult.data.firstName || '';
             userRecord.lastName = userResult.data.lastName || '';
             userRecord.username = userResult.data.username || '';
+            userRecord.photoUrl = userResult.data.photoUrl || '';
         }
         
         if (currentCowCount > previousCowCount) {
@@ -626,6 +629,7 @@ async function getLeaderboardData(env, currentUserId) {
             firstName: user.firstName || '',
             lastName: user.lastName || '',
             username: user.username || '',
+            photoUrl: user.photoUrl || '',
             cowCount: user.cowCount || 0,
             points: user.cowCount || 0,
             prize: leaderboard.isActive ? 
@@ -708,7 +712,10 @@ async function finalizeLeaderboard(env) {
                     rank: rank,
                     prize: prize,
                     cowCount: user.cowCount,
-                    awardedAt: now
+                    awardedAt: now,
+                    firstName: user.firstName || '',
+                    lastName: user.lastName || '',
+                    username: user.username || ''
                 };
                 
                 const userResult = await dbGet(env, `users/${user.userId}`);
