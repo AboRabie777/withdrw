@@ -2,6 +2,8 @@
 // FARM ECONOMY WORKER v5.5 - COMPLETE RACE CONDITION FIX WITH ETAG & ORDER LOCKING
 // FIXED: ALL operations now use atomicUpdateUserResource with ETag
 // FIXED: ExecuteOrder now properly locks the order to prevent multiple executions
+// ADDED: Max active orders limit (2 orders per user)
+// ADDED: Total price input for sell orders
 // ============================================
 
 export default {
@@ -435,7 +437,7 @@ const GAME_CONSTANTS = {
     DIAMOND_BASE_PRICE: 25,
     
     MIN_ORDER_AMOUNT: 100,
-    MAX_ACTIVE_ORDERS: 50,
+    MAX_ACTIVE_ORDERS: 2, // Maximum 2 active orders per user
     MARKET_FEE_PERCENT: 10,
     
     MIN_WITHDRAW_AMOUNT: 0.1,
@@ -489,6 +491,51 @@ const PARTNER_TASKS = [
 ];
 
 const ADMIN_IDS = ['123456789', '987654321'];
+
+// ============================================
+// CHECK MAX ACTIVE ORDERS (LIMIT 2)
+// ============================================
+
+async function checkUserActiveOrders(env, userId) {
+    try {
+        const ordersResult = await dbGet(env, `users/${userId}/orders`);
+        
+        if (!ordersResult.success || !ordersResult.data) {
+            return {
+                success: true,
+                activeCount: 0,
+                activeOrders: []
+            };
+        }
+        
+        const orders = ordersResult.data;
+        const activeOrders = [];
+        
+        for (const [orderId, order] of Object.entries(orders)) {
+            if (order.status === 'active') {
+                activeOrders.push({
+                    id: orderId,
+                    ...order
+                });
+            }
+        }
+        
+        return {
+            success: true,
+            activeCount: activeOrders.length,
+            activeOrders: activeOrders
+        };
+        
+    } catch (error) {
+        console.error('Check user active orders error:', error);
+        return {
+            success: false,
+            error: error.message,
+            activeCount: 0,
+            activeOrders: []
+        };
+    }
+}
 
 // ============================================
 // TELEGRAM VALIDATION
@@ -2412,6 +2459,25 @@ async function handleCreateSellOrder(env, userId, data) {
                 };
             }
             
+            // ===== CHECK MAX ACTIVE ORDERS (LIMIT 2) =====
+            const activeOrdersCheck = await checkUserActiveOrders(env, userId);
+            if (!activeOrdersCheck.success) {
+                return {
+                    success: false,
+                    error: 'Failed to check active orders',
+                    errorCode: 'ACTIVE_ORDERS_CHECK_FAILED'
+                };
+            }
+            
+            if (activeOrdersCheck.activeCount >= GAME_CONSTANTS.MAX_ACTIVE_ORDERS) {
+                return {
+                    success: false,
+                    error: `Maximum ${GAME_CONSTANTS.MAX_ACTIVE_ORDERS} active orders allowed. Please cancel an existing order first.`,
+                    errorCode: 'MAX_ACTIVE_ORDERS_REACHED',
+                    activeOrders: activeOrdersCheck.activeOrders
+                };
+            }
+            
             const userResult = await dbGet(env, `users/${userId}`);
             if (!userResult.success || !userResult.data) {
                 return {
@@ -2426,19 +2492,6 @@ async function handleCreateSellOrder(env, userId, data) {
             const productionResult = await calculateProduction(env, userId, user);
             if (productionResult) {
                 user = productionResult.user;
-            }
-            
-            const activeOrdersResult = await dbGet(env, `users/${userId}/orders`);
-            let activeOrders = 0;
-            if (activeOrdersResult.success && activeOrdersResult.data) {
-                activeOrders = Object.values(activeOrdersResult.data).filter(o => o.status === 'active').length;
-            }
-            if (activeOrders >= GAME_CONSTANTS.MAX_ACTIVE_ORDERS) {
-                return {
-                    success: false,
-                    error: `Maximum ${GAME_CONSTANTS.MAX_ACTIVE_ORDERS} active orders allowed`,
-                    errorCode: 'MAX_ORDERS_REACHED'
-                };
             }
             
             const atomicResult = await atomicUpdateUserResource(
@@ -2581,6 +2634,25 @@ async function handleCreateBuyOrder(env, userId, data) {
                 };
             }
             
+            // ===== CHECK MAX ACTIVE ORDERS (LIMIT 2) =====
+            const activeOrdersCheck = await checkUserActiveOrders(env, userId);
+            if (!activeOrdersCheck.success) {
+                return {
+                    success: false,
+                    error: 'Failed to check active orders',
+                    errorCode: 'ACTIVE_ORDERS_CHECK_FAILED'
+                };
+            }
+            
+            if (activeOrdersCheck.activeCount >= GAME_CONSTANTS.MAX_ACTIVE_ORDERS) {
+                return {
+                    success: false,
+                    error: `Maximum ${GAME_CONSTANTS.MAX_ACTIVE_ORDERS} active orders allowed. Please cancel an existing order first.`,
+                    errorCode: 'MAX_ACTIVE_ORDERS_REACHED',
+                    activeOrders: activeOrdersCheck.activeOrders
+                };
+            }
+            
             const userResult = await dbGet(env, `users/${userId}`);
             if (!userResult.success || !userResult.data) {
                 return {
@@ -2598,19 +2670,6 @@ async function handleCreateBuyOrder(env, userId, data) {
             }
             
             const totalCost = orderQuantity * orderPrice;
-            
-            const activeOrdersResult = await dbGet(env, `users/${userId}/orders`);
-            let activeOrders = 0;
-            if (activeOrdersResult.success && activeOrdersResult.data) {
-                activeOrders = Object.values(activeOrdersResult.data).filter(o => o.status === 'active').length;
-            }
-            if (activeOrders >= GAME_CONSTANTS.MAX_ACTIVE_ORDERS) {
-                return {
-                    success: false,
-                    error: `Maximum ${GAME_CONSTANTS.MAX_ACTIVE_ORDERS} active orders allowed`,
-                    errorCode: 'MAX_ORDERS_REACHED'
-                };
-            }
             
             const atomicResult = await atomicUpdateUserResource(
                 env, 
@@ -3173,7 +3232,8 @@ async function handleGetMyOrders(env, userId) {
             return {
                 success: true,
                 data: {
-                    orders: []
+                    active: [],
+                    filled: []
                 }
             };
         }
@@ -5022,7 +5082,8 @@ async function handleGetState(env, userId) {
                     BOUNTY_MIN_FOLLOWERS: GAME_CONSTANTS.BOUNTY_MIN_FOLLOWERS,
                     MIN_TASK_TARGET: GAME_CONSTANTS.MIN_TASK_TARGET,
                     
-                    MAX_RETRY_ATTEMPTS: GAME_CONSTANTS.MAX_RETRY_ATTEMPTS
+                    MAX_RETRY_ATTEMPTS: GAME_CONSTANTS.MAX_RETRY_ATTEMPTS,
+                    MAX_ACTIVE_ORDERS: GAME_CONSTANTS.MAX_ACTIVE_ORDERS
                 },
                 
                 referral: referralStats,
