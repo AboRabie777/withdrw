@@ -7,6 +7,7 @@
 // ADDED: Leaderboard competition system (150 TON prizes based on cow ownership)
 // FIXED: Leaderboard counter now uses global cows_sold statistic (same as main page progress bar)
 // UPDATED: Leaderboard prizes distribution (40,30,20,10,8,6,5,4,3,3,2,2,2,2,2,2,2,2,2,1)
+// FIXED: Added photoUrl to leaderboard data for proper avatar display
 // ============================================
 
 export default {
@@ -434,6 +435,8 @@ const GAME_CONSTANTS = {
     MIN_ORDER_AMOUNT: 100,
     MAX_ACTIVE_ORDERS: 2, // Maximum 2 active orders per user
     MARKET_FEE_PERCENT: 10,
+    MIN_ORDER_PRICE: 0.0002, // Minimum price per unit to avoid penalty
+    ORDER_PENALTY_FEE: 0.2, // Penalty fee for orders below minimum price
     
     MIN_WITHDRAW_AMOUNT: 0.1,
     WITHDRAW_FEE_PERCENT: 5,
@@ -510,7 +513,7 @@ const PARTNER_TASKS = [
 const ADMIN_IDS = ['123456789', '987654321'];
 
 // ============================================
-// LEADERBOARD FUNCTIONS - FIXED TO USE GLOBAL COW SALES
+// LEADERBOARD FUNCTIONS - FIXED TO USE GLOBAL COW SALES WITH PHOTOURL
 // ============================================
 
 async function initializeLeaderboard(env) {
@@ -629,7 +632,7 @@ async function getLeaderboardData(env, currentUserId) {
             firstName: user.firstName || '',
             lastName: user.lastName || '',
             username: user.username || '',
-            photoUrl: user.photoUrl || '',
+            photoUrl: user.photoUrl || '', // تأكد من وجود هذا السطر
             cowCount: user.cowCount || 0,
             points: user.cowCount || 0,
             prize: leaderboard.isActive ? 
@@ -2767,8 +2770,63 @@ async function handleCreateSellOrder(env, userId, data) {
                 };
             }
             
+            // ===== CHECK PRICE PENALTY =====
+            let penaltyFee = 0;
+            if (orderPrice < GAME_CONSTANTS.MIN_ORDER_PRICE) {
+                penaltyFee = GAME_CONSTANTS.ORDER_PENALTY_FEE;
+                
+                // Check if user has enough balance for penalty
+                const userResult = await dbGet(env, `users/${userId}`);
+                if (!userResult.success || !userResult.data) {
+                    return {
+                        success: false,
+                        error: 'User not found',
+                        errorCode: 'USER_NOT_FOUND'
+                    };
+                }
+                
+                if ((userResult.data.tonBalance || 0) < penaltyFee) {
+                    return {
+                        success: false,
+                        error: `Price too low. Penalty fee of ${penaltyFee} TON required. Insufficient balance.`,
+                        errorCode: 'INSUFFICIENT_TON_FOR_PENALTY',
+                        requiredBalance: penaltyFee,
+                        currentBalance: userResult.data.tonBalance
+                    };
+                }
+                
+                // Deduct penalty fee
+                const penaltyResult = await atomicUpdateUserResource(
+                    env,
+                    userId,
+                    'tonBalance',
+                    penaltyFee
+                );
+                
+                if (!penaltyResult.success) {
+                    if (penaltyResult.errorCode === 'RACE_CONDITION_DETECTED') {
+                        attempt++;
+                        if (attempt < maxAttempts) {
+                            console.log(`Race condition detected for user ${userId} (penalty fee), retry attempt ${attempt}/${maxAttempts}`);
+                            await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                            continue;
+                        }
+                    } else {
+                        return {
+                            success: false,
+                            error: penaltyResult.error,
+                            errorCode: penaltyResult.errorCode || 'PENALTY_FEE_FAILED'
+                        };
+                    }
+                }
+            }
+            
             const userResult = await dbGet(env, `users/${userId}`);
             if (!userResult.success || !userResult.data) {
+                // If penalty was deducted and we fail here, we should note that penalty is non-refundable
+                if (penaltyFee > 0) {
+                    console.log(`Penalty fee ${penaltyFee} deducted from user ${userId} but order creation failed later. Penalty is non-refundable.`);
+                }
                 return {
                     success: false,
                     error: 'User not found',
@@ -2791,6 +2849,11 @@ async function handleCreateSellOrder(env, userId, data) {
             );
             
             if (!atomicResult.success) {
+                // Note: Penalty fee is non-refundable even if resource update fails
+                if (penaltyFee > 0) {
+                    console.log(`Penalty fee ${penaltyFee} deducted from user ${userId} but resource update failed. Penalty is non-refundable.`);
+                }
+                
                 if (atomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
                     attempt++;
                     if (attempt < maxAttempts) {
@@ -2831,6 +2894,8 @@ async function handleCreateSellOrder(env, userId, data) {
                 remaining: orderQuantity,
                 pricePerUnit: orderPrice,
                 status: 'active',
+                penaltyPaid: penaltyFee > 0,
+                penaltyAmount: penaltyFee,
                 createdAt: now,
                 updatedAt: now
             };
@@ -2844,6 +2909,8 @@ async function handleCreateSellOrder(env, userId, data) {
                 remaining: orderQuantity,
                 pricePerUnit: orderPrice,
                 status: 'active',
+                penaltyPaid: penaltyFee > 0,
+                penaltyAmount: penaltyFee,
                 createdAt: now
             });
             
@@ -2854,17 +2921,25 @@ async function handleCreateSellOrder(env, userId, data) {
                 quantity: orderQuantity,
                 pricePerUnit: orderPrice,
                 totalValue: orderQuantity * orderPrice,
+                penaltyFee: penaltyFee,
                 timestamp: now
             });
             
+            let responseData = {
+                orderId: orderId,
+                order: orderData,
+                newBalance: atomicResult.data.newBalance,
+                deducted: atomicResult.data.deducted
+            };
+            
+            if (penaltyFee > 0) {
+                responseData.penaltyFee = penaltyFee;
+                responseData.message = `Warning: Price below ${GAME_CONSTANTS.MIN_ORDER_PRICE} TON. Penalty fee of ${penaltyFee} TON deducted (non-refundable).`;
+            }
+            
             return {
                 success: true,
-                data: {
-                    orderId: orderId,
-                    order: orderData,
-                    newBalance: atomicResult.data.newBalance,
-                    deducted: atomicResult.data.deducted
-                }
+                data: responseData
             };
             
         } catch (error) {
@@ -4961,6 +5036,8 @@ async function handleGetState(env, userId) {
                     REFERRAL_REWARD_PERCENT: GAME_CONSTANTS.REFERRAL_REWARD_PERCENT,
                     MIN_ORDER_AMOUNT: GAME_CONSTANTS.MIN_ORDER_AMOUNT,
                     MARKET_FEE_PERCENT: GAME_CONSTANTS.MARKET_FEE_PERCENT,
+                    MIN_ORDER_PRICE: GAME_CONSTANTS.MIN_ORDER_PRICE,
+                    ORDER_PENALTY_FEE: GAME_CONSTANTS.ORDER_PENALTY_FEE,
                     TASK_REWARD: GAME_CONSTANTS.TASK_REWARD,
                     
                     MIN_TASK_TARGET: GAME_CONSTANTS.MIN_TASK_TARGET,
