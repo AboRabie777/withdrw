@@ -464,7 +464,6 @@
             animation: trophy-glow 2s infinite;
         }
         
-        /* إضافة علامة استفهام */
         .leaderboard-help-icon {
             position: absolute;
             right: 0;
@@ -490,7 +489,6 @@
             transform: translateY(-50%) scale(1.1);
         }
         
-        /* ===== REDUCED PRIZE POOL CARD SIZE ===== */
         .prize-pool {
             display: flex;
             align-items: center;
@@ -591,7 +589,6 @@
             color: #FFD700;
         }
         
-        /* ===== REDESIGNED YOUR POSITION CARD - بدون عدد البقرات ===== */
         .your-position-card {
             background: linear-gradient(145deg, rgba(255, 92, 168, 0.2), rgba(0, 212, 255, 0.2));
             border-radius: 30px;
@@ -758,7 +755,7 @@
         }
         
         .user-avatar-small {
-            display: none; /* إخفاء الصورة تمامًا */
+            display: none;
         }
         
         .user-info {
@@ -1962,7 +1959,6 @@
             transform: scale(0.95);
         }
         
-        /* نافذة شرح المسابقة - مترجمة */
         .leaderboard-info-modal {
             position: fixed;
             top: 50%;
@@ -2056,7 +2052,6 @@
             .counter-main { font-size: 24px; }
             .prize-amount { font-size: 18px; }
             
-            /* Responsive adjustments for mobile */
             .position-row {
                 flex-wrap: wrap;
                 gap: 8px;
@@ -2114,7 +2109,6 @@
         <i class="fas fa-question"></i>
     </div>
 
-    <!-- نافذة شرح المسابقة - مترجمة ديناميكياً حسب اللغة -->
     <div class="leaderboard-info-modal" id="leaderboardInfoModal">
         <div class="info-title">
             <i class="fas fa-trophy" style="color: #FFD700;"></i>
@@ -2125,13 +2119,12 @@
             <h4 id="infoGrandPrize">🏆 Grand Prize</h4>
             <p id="infoTotalPrize">Total prize pool 150 TON distributed to top 20 players</p>
             <div class="info-prize" id="infoPrizeList">
-                <!-- سيتم ملء هذه القائمة ديناميكياً حسب اللغة -->
             </div>
         </div>
         
         <div class="info-section">
             <h4 id="infoHowToParticipate">🐮 How to participate?</h4>
-            <p id="infoHowToDesc">Each cow you buy = 1 point in the competition<br>You must buy at least one cow to appear on the leaderboard</p>
+            <p id="infoHowToDesc">Each new cow you buy = 10 points in the competition<br>You must buy at least one cow to appear on the leaderboard</p>
         </div>
         
         <div class="info-section">
@@ -2156,7 +2149,7 @@
             <div class="help-emoji"><img src="https://i.ibb.co/j9zxzsQB/photo-5807836880429583588-m.jpg" style="width: 30px; height: 30px; border-radius: 8px;"></div>
             <div class="help-text">
                 <h4 data-i18n="help.cow.title">Cow Machine</h4>
-                <p data-i18n="help.cow.desc">1 TON · 41 Milk/hour<br>Global cap: 1000 machines</p>
+                <p data-i18n="help.cow.desc">1 TON · 41 Milk/hour<br>Global cap: 1000 machines<br>Hatch: 10,000 Milk = 1 Cow</p>
             </div>
         </div>
         
@@ -2180,7 +2173,7 @@
             <div class="help-emoji">🥛→🐮</div>
             <div class="help-text">
                 <h4 data-i18n="help.hatch.title">Hatch System</h4>
-                <p data-i18n="help.hatch.desc">5,000 Milk = 1 Cow<br>5,000 Eggs = 1 Chicken<br>No global cap limit</p>
+                <p data-i18n="help.hatch.desc">10,000 Milk = 1 Cow<br>5,000 Eggs = 1 Chicken<br>No global cap limit</p>
             </div>
         </div>
         
@@ -2212,7 +2205,7 @@
             <div class="help-emoji">🏆</div>
             <div class="help-text">
                 <h4 data-i18n="help.leaderboard.title">Leaderboard Competition</h4>
-                <p data-i18n="help.leaderboard.desc">1 cow = 1 point · Top 20 win 150 TON total<br>Ends when 1000 cows sold<br><span style="color: #FFD700;">⚠️ You must buy a cow to appear on leaderboard!</span></p>
+                <p data-i18n="help.leaderboard.desc">1 new cow = 10 points · Top 20 win 150 TON total<br>Ends when 1000 cows sold<br>⚠️ You must buy a cow to appear on leaderboard!</p>
             </div>
         </div>
     </div>
@@ -2278,18 +2271,15 @@
 
     <div class="container" id="appContainer">
         
-        <!-- Leaderboard Section - Enhanced with reduced size -->
         <div id="sectionLeaderboard" class="section">
             <div class="leaderboard-header">
                 <div class="leaderboard-title">
                     <i class="fas fa-trophy"></i> LEADERBOARD
-                    <!-- إضافة علامة استفهام -->
                     <span class="leaderboard-help-icon" onclick="document.getElementById('leaderboardInfoModal').classList.add('active'); updateLeaderboardInfoLanguage();">
                         <i class="fas fa-question"></i>
                     </span>
                 </div>
                 
-                <!-- Reduced prize pool card -->
                 <div class="prize-pool">
                     <span class="prize-label">🏆 TOTAL PRIZE</span>
                     <span class="prize-amount">
@@ -2299,7 +2289,7 @@
                 </div>
                 
                 <div class="leaderboard-note">
-                    <i class="fas fa-info-circle"></i> You must buy a cow to appear on the leaderboard!
+                    <i class="fas fa-info-circle"></i> You must buy a cow to appear on the leaderboard! (10 points per new cow)
                 </div>
                 
                 <div class="progress-counter" id="leaderboardProgress">
@@ -2316,7 +2306,6 @@
                 </div>
             </div>
             
-            <!-- Redesigned your position card - بدون عدد البقرات -->
             <div class="your-position-card" id="yourPositionCard">
                 <div class="position-row">
                     <span class="position-label">Your Position</span>
@@ -2335,7 +2324,6 @@
                         </div>
                     </div>
                 </div>
-                <!-- السطر الخاص بعدد البقرات تم حذفه -->
             </div>
             
             <div class="card">
@@ -2344,7 +2332,6 @@
                 </div>
                 
                 <div class="leaderboard-grid" id="leaderboardList">
-                    <!-- Leaderboard items will be loaded here -->
                     <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
                         <i class="fas fa-trophy" style="font-size: 48px; margin-bottom: 15px; opacity: 0.5;"></i>
                         <p>Loading leaderboard...</p>
@@ -2357,7 +2344,6 @@
                     <i class="fas fa-crown"></i> Competition Winners
                 </div>
                 <div class="winners-grid" id="winnersList">
-                    <!-- Winners will be shown here when competition ends -->
                 </div>
             </div>
         </div>
@@ -2969,7 +2955,7 @@
             <div class="hatch-option" id="hatchCowOption">
                 <div class="hatch-info">
                     <span class="hatch-title">🐮 <span data-i18n="farm.cow.name">Cow</span></span>
-                    <span class="hatch-cost" data-i18n="modal.hatch.cowCost">5,000 Milk</span>
+                    <span class="hatch-cost" data-i18n="modal.hatch.cowCost">10,000 Milk</span>
                     <span class="hatch-balance" id="hatchCowBalance">Your milk: 0</span>
                 </div>
                 <div style="display: flex; align-items: center; gap: 5px;">
@@ -3150,7 +3136,8 @@
             TASK_REWARD: 0.001,
             MAX_ACTIVE_ORDERS: 2,
             MIN_ORDER_PRICE: 0.0002,
-            ORDER_PENALTY_FEE: 0.2
+            ORDER_PENALTY_FEE: 0.2,
+            COW_HATCH_COST: 10000
         };
 
         const TRANSLATIONS = {
@@ -3255,7 +3242,7 @@
                 'modal.confirm.confirm': 'Confirm & Pay',
                 
                 'modal.hatch.title': 'Hatch Machine',
-                'modal.hatch.cowCost': '5,000 Milk',
+                'modal.hatch.cowCost': '10,000 Milk',
                 'modal.hatch.chickenCost': '5,000 Eggs',
                 'modal.hatch.hatchBtn': 'Hatch',
                 
@@ -3272,13 +3259,13 @@
                 
                 'help.title': 'How to Play',
                 'help.cow.title': 'Cow Machine',
-                'help.cow.desc': '1 TON · 41 Milk/hour<br>Global cap: 1000 machines',
+                'help.cow.desc': '1 TON · 41 Milk/hour<br>Global cap: 1000 machines<br>Hatch: 10,000 Milk = 1 Cow',
                 'help.chicken.title': 'Chicken Machine',
                 'help.chicken.desc': '1 TON · 41 Eggs/hour<br>Unlocks after all Cows sold',
                 'help.crystal.title': 'Crystal Engine',
                 'help.crystal.desc': '20 TON · 20k Milk + 20k Eggs = 1 Crystal<br>Convert Crystals → TON',
                 'help.hatch.title': 'Hatch System',
-                'help.hatch.desc': '5,000 Milk = 1 Cow<br>5,000 Eggs = 1 Chicken<br>No global cap limit',
+                'help.hatch.desc': '10,000 Milk = 1 Cow<br>5,000 Eggs = 1 Chicken<br>No global cap limit',
                 'help.market.title': 'P2P Market',
                 'help.market.desc': 'Trade Milk & Eggs with other players<br>Card system · Best price 🔥',
                 'help.referral.title': 'Referral',
@@ -3286,7 +3273,7 @@
                 'help.tasks.title': 'Tasks & Rewards',
                 'help.tasks.desc': 'Complete tasks to earn 0.001 TON<br>Create your own community tasks (min 100 users)',
                 'help.leaderboard.title': 'Leaderboard Competition',
-                'help.leaderboard.desc': '1 cow = 1 point · Top 20 win 150 TON total<br>Ends when 1000 cows sold<br>⚠️ You must buy a cow to appear on leaderboard!'
+                'help.leaderboard.desc': '1 new cow = 10 points · Top 20 win 150 TON total<br>Ends when 1000 cows sold<br>⚠️ You must buy a cow to appear on leaderboard!'
             },
             ru: {
                 'nav.farm': 'Ферма',
@@ -3389,7 +3376,7 @@
                 'modal.confirm.confirm': 'Подтвердить и оплатить',
                 
                 'modal.hatch.title': 'Вывести машину',
-                'modal.hatch.cowCost': '5,000 Молока',
+                'modal.hatch.cowCost': '10,000 Молока',
                 'modal.hatch.chickenCost': '5,000 Яиц',
                 'modal.hatch.hatchBtn': 'Вывести',
                 
@@ -3406,13 +3393,13 @@
                 
                 'help.title': 'Как играть',
                 'help.cow.title': 'Корова',
-                'help.cow.desc': '1 TON · 41 Молоко/час<br>Всего: 1000 машин',
+                'help.cow.desc': '1 TON · 41 Молоко/час<br>Всего: 1000 машин<br>Вывод: 10,000 Молока = 1 Корова',
                 'help.chicken.title': 'Курица',
                 'help.chicken.desc': '1 TON · 41 Яйца/час<br>Открывается после всех коров',
                 'help.crystal.title': 'Кристальный двигатель',
                 'help.crystal.desc': '20 TON · 20k Молока + 20k Яиц = 1 Кристалл<br>Конвертация в TON',
                 'help.hatch.title': 'Система вывода',
-                'help.hatch.desc': '5,000 Молока = 1 Корова<br>5,000 Яиц = 1 Курица<br>Без лимита',
+                'help.hatch.desc': '10,000 Молока = 1 Корова<br>5,000 Яиц = 1 Курица<br>Без лимита',
                 'help.market.title': 'P2P Рынок',
                 'help.market.desc': 'Торгуйте молоком и яйцами<br>Карточная система',
                 'help.referral.title': 'Рефералы',
@@ -3420,18 +3407,17 @@
                 'help.tasks.title': 'Задания',
                 'help.tasks.desc': 'Выполняйте задания за 0.001 TON',
                 'help.leaderboard.title': 'Соревнование',
-                'help.leaderboard.desc': '1 корова = 1 очко · Топ-20 выигрывают 150 TON<br>Заканчивается когда продано 1000 коров'
+                'help.leaderboard.desc': '1 новая корова = 10 очков · Топ-20 выигрывают 150 TON<br>Заканчивается когда продано 1000 коров'
             }
         };
 
-        // ترجمة نافذة شرح المسابقة
         const LEADERBOARD_INFO_TRANSLATIONS = {
             en: {
                 title: '🏆 How does the competition work?',
                 grandPrize: '🏆 Grand Prize',
                 totalPrize: 'Total prize pool 150 TON distributed to top 20 players',
                 howToParticipate: '🐮 How to participate?',
-                howToDesc: 'Each cow you buy = 1 point in the competition<br>You must buy at least one cow to appear on the leaderboard',
+                howToDesc: 'Each new cow you buy = 10 points in the competition<br>You must buy at least one cow to appear on the leaderboard',
                 whenEnds: '⏰ When does it end?',
                 whenDesc: 'The competition ends when 1000 cows are sold',
                 gotIt: '✅ Got it',
@@ -3454,7 +3440,7 @@
                 grandPrize: '🏆 Главный приз',
                 totalPrize: 'Общий призовой фонд 150 TON распределяется между топ-20 игроками',
                 howToParticipate: '🐮 Как участвовать?',
-                howToDesc: 'Каждая купленная корова = 1 очко в соревновании<br>Вы должны купить хотя бы одну корову, чтобы появиться в таблице лидеров',
+                howToDesc: 'Каждая новая купленная корова = 10 очков в соревновании<br>Вы должны купить хотя бы одну корову, чтобы появиться в таблице лидеров',
                 whenEnds: '⏰ Когда заканчивается?',
                 whenDesc: 'Соревнование заканчивается, когда продано 1000 коров',
                 gotIt: '✅ Понятно',
@@ -3487,7 +3473,6 @@
             document.getElementById('infoWhenDesc').innerHTML = translations.whenDesc;
             document.getElementById('infoGotIt').innerHTML = translations.gotIt;
             
-            // تحديث قائمة الجوائز
             let prizeHtml = '';
             translations.prizeList.forEach(item => {
                 prizeHtml += `<div class="info-prize-row"><span>${item.rank}</span> <span style="color: #FFD700;">${item.prize}</span></div>`;
@@ -3533,7 +3518,6 @@
             initialized: false
         };
 
-        // Cooldown protection
         const lastClickTimers = {};
         const CLICK_COOLDOWN = 10000;
 
@@ -3546,7 +3530,7 @@
                 const secondsLeft = Math.ceil(timeLeft / 1000);
                 showNotification(
                     App.currentLanguage === 'ru' ? 
-                    `⏳ الرجاء الانتظار ${secondsLeft} ثانية قبل الضغط مرة أخرى` : 
+                    `⏳ Пожалуйста, подождите ${secondsLeft} секунд перед повторным нажатием` : 
                     `⏳ Please wait ${secondsLeft} seconds before clicking again`,
                     'warning'
                 );
@@ -3579,7 +3563,6 @@
             return true;
         }
 
-        // Notification function
         function showNotification(message, type = 'success', duration = 5000) {
             const container = document.getElementById('notificationContainer');
             const notification = document.createElement('div');
@@ -3598,7 +3581,6 @@
             }, duration);
         }
 
-        // Format number with full precision for small numbers
         function formatFullPrecision(num) {
             if (num === null || num === undefined) return '0';
             if (Math.abs(num) < 0.0001 && num !== 0) {
@@ -3607,7 +3589,6 @@
             return num.toFixed(8).replace(/\.?0+$/, '');
         }
 
-        // Format TON with full precision
         function formatTON(amount) {
             if (amount === null || amount === undefined || isNaN(amount)) return '0';
             if (Math.abs(amount) < 0.0001 && amount !== 0) {
@@ -3616,7 +3597,6 @@
             return parseFloat(amount).toFixed(4);
         }
 
-        // Format number
         function formatNumber(num) {
             if (num === null || num === undefined) return '0';
             if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M';
@@ -3624,7 +3604,6 @@
             return num.toLocaleString();
         }
 
-        // Language functions
         function setLanguage(lang) {
             if (!TRANSLATIONS[lang]) return;
             
@@ -3654,11 +3633,9 @@
                 App.tonConnectUI.language = lang === 'ru' ? 'ru' : 'en';
             }
             
-            // تحديث نافذة شرح المسابقة عند تغيير اللغة
             updateLeaderboardInfoLanguage();
         }
 
-        // Initialize app
         async function initApp() {
             console.log('Crystal Ranch · Initializing...');
             
@@ -3678,7 +3655,6 @@
             console.log('Crystal Ranch · Ready');
         }
 
-        // Telegram setup
         async function setupTelegram() {
             return new Promise((resolve) => {
                 if (window.Telegram && window.Telegram.WebApp) {
@@ -3723,7 +3699,6 @@
             });
         }
 
-        // Initialize user in database
         async function initializeUser() {
             try {
                 const referrer = sessionStorage.getItem('referrer');
@@ -3762,7 +3737,6 @@
             }
         }
 
-        // TON Connect
         async function initTONConnect() {
             try {
                 if (window.TON_CONNECT_UI) {
@@ -3837,7 +3811,6 @@
             }
         }
 
-        // API call function
         async function callAPI(action, data = {}) {
             try {
                 const headers = {
@@ -3871,7 +3844,6 @@
             }
         }
 
-        // Load game state from server
         async function loadGameState() {
             try {
                 const state = await callAPI('getState');
@@ -3929,25 +3901,21 @@
             }
         }
 
-        // ===== LEADERBOARD FUNCTIONS =====
         function updateLeaderboardUI() {
             if (!App.leaderboard) return;
             
             const leaderboard = App.leaderboard;
             
-            // Update progress counter
             document.getElementById('leaderboardCowsSold').innerHTML = leaderboard.totalCowSales || 0;
             const progressPercent = ((leaderboard.totalCowSales || 0) / 1000) * 100;
             document.getElementById('leaderboardProgressFill').style.width = `${progressPercent}%`;
             document.getElementById('leaderboardRemaining').innerHTML = `Remaining: ${leaderboard.remainingCows || 0}`;
             
-            // Update user position card - بدون عدد البقرات
             const currentUser = leaderboard.currentUser || { rank: 0, points: 0, cowCount: 0, prize: 0, photoUrl: '' };
             document.getElementById('userRank').innerHTML = `#${currentUser.rank || 0}`;
             document.getElementById('userPoints').innerHTML = currentUser.points || 0;
             document.getElementById('userPrize').innerHTML = `<img src="https://i.ibb.co/WNfvBK9h/toncoin-1.webp" style="width: 12px; height: 12px; object-fit: contain;"> ${currentUser.prize || 0}`;
             
-            // Show/hide winners section
             const winnersSection = document.getElementById('winnersSection');
             if (!leaderboard.isActive && leaderboard.prizesDistributed) {
                 winnersSection.style.display = 'block';
@@ -3957,10 +3925,8 @@
                 winnersSection.style.display = 'none';
             }
             
-            // Display leaderboard list
             displayLeaderboardList(leaderboard.leaderboard);
             
-            // تحديث صورة المستخدم الحالي في كارت "Your Position" إذا كانت متاحة
             if (currentUser && currentUser.photoUrl) {
                 const userAvatar = document.getElementById('profileAvatar');
                 if (userAvatar) {
@@ -4004,7 +3970,7 @@
                                 <span class="user-name">${name}</span>
                                 ${rank <= 3 ? '<span class="user-crown"><i class="fas fa-crown"></i></span>' : ''}
                             </div>
-                            <div class="user-username"></div> <!-- Hidden username -->
+                            <div class="user-username"></div>
                         </div>
                         <div class="points-section">
                             <div class="points-box">
@@ -4088,7 +4054,6 @@
             }
         }
 
-        // Market functions
         async function updateMarketUI(page = 1, reset = true) {
             if (!App.currentMarketResource) return;
             
@@ -4181,7 +4146,6 @@
                 const perUnit = totalPrice / quantity;
                 document.getElementById('sellPerUnitHint').innerHTML = `≈ ${formatFullPrecision(perUnit)} TON per unit`;
                 
-                // Show penalty warning if price below minimum
                 const penaltyWarning = document.getElementById('sellPenaltyWarning');
                 if (perUnit < CONFIG.MIN_ORDER_PRICE) {
                     penaltyWarning.style.display = 'block';
@@ -4217,38 +4181,36 @@
             const totalPrice = parseFloat(document.getElementById('sellTotalPrice').value);
             
             if (!resource || !quantity || !totalPrice) {
-                alert(App.currentLanguage === 'ru' ? 'Fill all fields' : 'Fill all fields');
+                alert(App.currentLanguage === 'ru' ? 'Заполните все поля' : 'Fill all fields');
                 return;
             }
             
             if (quantity < 100) {
-                alert(App.currentLanguage === 'ru' ? 'Minimum 100 units' : 'Minimum 100 units');
+                alert(App.currentLanguage === 'ru' ? 'Минимум 100 единиц' : 'Minimum 100 units');
                 return;
             }
             
             if (totalPrice <= 0) {
-                alert(App.currentLanguage === 'ru' ? 'Total price must be > 0' : 'Total price must be > 0');
+                alert(App.currentLanguage === 'ru' ? 'Общая цена должна быть > 0' : 'Total price must be > 0');
                 return;
             }
             
             const pricePerUnit = totalPrice / quantity;
             
-            // Check if price is below minimum and if user has enough balance for penalty
             if (pricePerUnit < CONFIG.MIN_ORDER_PRICE) {
                 if ((App.user?.tonBalance || 0) < CONFIG.ORDER_PENALTY_FEE) {
                     alert(App.currentLanguage === 'ru' ? 
-                        `Insufficient balance for penalty fee. Need ${CONFIG.ORDER_PENALTY_FEE} TON.` : 
+                        `Недостаточно средств для штрафа. Нужно ${CONFIG.ORDER_PENALTY_FEE} TON.` : 
                         `Insufficient balance for penalty fee. Need ${CONFIG.ORDER_PENALTY_FEE} TON.`);
                     return;
                 }
             }
             
-            // Check active orders count
             const activeOrdersCount = await checkActiveOrdersCount();
             if (activeOrdersCount >= CONFIG.MAX_ACTIVE_ORDERS) {
                 const message = App.currentLanguage === 'ru' ? 
-                    `⚠️ You can only have ${CONFIG.MAX_ACTIVE_ORDERS} active orders. Please cancel an order first.` : 
-                    `⚠️ У вас может быть только ${CONFIG.MAX_ACTIVE_ORDERS} активных заказов. Пожалуйста, сначала отмените заказ.`;
+                    `⚠️ У вас может быть только ${CONFIG.MAX_ACTIVE_ORDERS} активных заказов. Пожалуйста, сначала отмените заказ.` : 
+                    `⚠️ You can only have ${CONFIG.MAX_ACTIVE_ORDERS} active orders. Please cancel an order first.`;
                 showNotification(message, 'warning');
                 return;
             }
@@ -4260,9 +4222,9 @@
                     pricePerUnit: pricePerUnit
                 });
                 
-                let message = App.currentLanguage === 'ru' ? '✅ Sell order created' : '✅ Sell order created';
+                let message = App.currentLanguage === 'ru' ? '✅ Ордер на продажу создан' : '✅ Sell order created';
                 if (result.penaltyFee) {
-                    message += `. Penalty fee: ${result.penaltyFee} TON deducted.`;
+                    message += `. Штраф: ${result.penaltyFee} TON.`;
                 }
                 
                 showNotification(message, 'success');
@@ -4405,7 +4367,7 @@
                                     <span>${formatFullPrecision(total)}</span>
                                 </div>
                                 <div class="unit-price">${formatFullPrecision(pricePerUnit)} TON/${order.resource === 'milk' ? 'milk' : 'egg'}</div>
-                                ${order.penaltyPaid ? '<div style="font-size: 8px; color: var(--warning); margin: 4px 0;">Penalty: ' + order.penaltyAmount + ' TON</div>' : ''}
+                                ${order.penaltyPaid ? '<div style="font-size: 8px; color: var(--warning); margin: 4px 0;">Штраф: ' + order.penaltyAmount + ' TON</div>' : ''}
                                 <button class="btn btn-secondary" style="padding: 8px; font-size: 12px; margin-top: 8px;" onclick="window.cancelOrder('${order.id}')">
                                     ${App.currentLanguage === 'ru' ? 'Отменить' : 'Cancel'}
                                 </button>
@@ -4449,7 +4411,6 @@
             }
         }
 
-        // Referral UI
         function updateReferralUI() {
             if (!App.referral) return;
             
@@ -4535,10 +4496,10 @@
                     const name = earning.firstName || earning.username || `User ${earning.userId?.substring(0, 6)}`;
                     
                     let typeDisplay = '';
-                    if (earning.type === 'cow_purchase') typeDisplay = '🐮 Cow';
-                    else if (earning.type === 'chicken_purchase') typeDisplay = '🐔 Chicken';
-                    else if (earning.type === 'diamond_engine_purchase') typeDisplay = '💎 Crystal Engine';
-                    else typeDisplay = earning.type || 'purchase';
+                    if (earning.type === 'cow_purchase') typeDisplay = '🐮 Корова';
+                    else if (earning.type === 'chicken_purchase') typeDisplay = '🐔 Курица';
+                    else if (earning.type === 'diamond_engine_purchase') typeDisplay = '💎 Кристальный двигатель';
+                    else typeDisplay = earning.type || 'покупка';
                     
                     html += `<div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid rgba(255,255,255,0.05);">
                         <div>
@@ -4579,7 +4540,6 @@
             displayEarnings(App.earningsPage, true);
         }
 
-        // UI Update functions
         function updateAllUI() {
             if (!App.user || !App.global) return;
             
@@ -4609,8 +4569,8 @@
                 cowBadge.className = 'machine-badge badge-soldout';
             } else {
                 cowBtn.disabled = false;
-                cowBtn.innerHTML = '<i class="fas fa-shopping-cart"></i> ' + (App.currentLanguage === 'ru' ? 'شراء متعدد' : 'Buy Multiple');
-                cowBadge.innerHTML = `${App.global.cows_remaining} ` + (App.currentLanguage === 'ru' ? 'متبقي' : 'LEFT');
+                cowBtn.innerHTML = '<i class="fas fa-shopping-cart"></i> ' + (App.currentLanguage === 'ru' ? 'Купить несколько' : 'Buy Multiple');
+                cowBadge.innerHTML = `${App.global.cows_remaining} ` + (App.currentLanguage === 'ru' ? 'ОСТАЛОСЬ' : 'LEFT');
                 cowBadge.className = 'machine-badge badge-available';
             }
             
@@ -4737,7 +4697,6 @@
             document.getElementById('taskUserBalance').innerHTML = formatTON(App.user.tonBalance || 0);
         }
 
-        // Task functions
         window.createTask = async function() {
             const buttonId = 'submitTaskBtn';
             const button = document.getElementById('submitTaskBtn');
@@ -4963,20 +4922,19 @@
                 
                 if (errorMessage.includes('Not a member') || errorMessage.includes('NOT_MEMBER')) {
                     statusDiv.innerHTML = '<div style="color: var(--danger-red); text-align: center;">❌ ' + 
-                        (App.currentLanguage === 'ru' ? 'Not a member of the channel' : 'Not a member of the channel') + '</div>';
+                        (App.currentLanguage === 'ru' ? 'Не участник канала' : 'Not a member of the channel') + '</div>';
                     
                     sessionStorage.removeItem(`task_${task.id}_joined`);
                 } else if (errorMessage.includes('already completed') || errorMessage.includes('TASK_ALREADY_COMPLETED')) {
                     statusDiv.innerHTML = '<div style="color: var(--warning); text-align: center;">⚠️ ' + 
-                        (App.currentLanguage === 'ru' ? 'Task already completed' : 'Task already completed') + '</div>';
+                        (App.currentLanguage === 'ru' ? 'Задание уже выполнено' : 'Task already completed') + '</div>';
                 } else {
                     statusDiv.innerHTML = '<div style="color: var(--danger-red); text-align: center;">❌ ' + 
-                        (errorMessage || (App.currentLanguage === 'ru' ? 'خطأ في التحقق' : 'Verification error')) + '</div>';
+                        (errorMessage || (App.currentLanguage === 'ru' ? 'Ошибка проверки' : 'Verification error')) + '</div>';
                 }
             }
         }
 
-        // Buy functions
         window.buyCow = async function() {
             const buttonId = 'buyCowBtn';
             const button = document.getElementById('buyCowBtn');
@@ -4985,7 +4943,6 @@
                 return;
             }
             
-            // Show quantity modal
             const modal = document.createElement('div');
             modal.className = 'modal-overlay active';
             modal.id = 'buyCowModal';
@@ -4993,13 +4950,13 @@
                 <div class="modal-content">
                     <div class="modal-header">
                         <h3 class="modal-title">
-                            <i class="fas fa-cow" style="color: var(--neon-green);"></i> ${App.currentLanguage === 'ru' ? 'شراء البقرة' : 'Buy Cow'}
+                            <i class="fas fa-cow" style="color: var(--neon-green);"></i> ${App.currentLanguage === 'ru' ? 'Купить корову' : 'Buy Cow'}
                         </h3>
                         <i class="fas fa-times modal-close" onclick="document.getElementById('buyCowModal').remove()"></i>
                     </div>
                     
                     <div class="form-group">
-                        <label class="form-label">${App.currentLanguage === 'ru' ? 'الكمية' : 'Quantity'}</label>
+                        <label class="form-label">${App.currentLanguage === 'ru' ? 'Количество' : 'Quantity'}</label>
                         <input type="number" id="buyCowQuantity" class="form-input" value="1" min="1" max="${App.global?.cows_remaining || 1000}" oninput="updateCowTotal()">
                         
                         <div class="preset-buttons" style="margin-top: 10px;">
@@ -5013,26 +4970,26 @@
                     </div>
                     
                     <div class="total-ton-result" id="cowTotalPrice">
-                        ${App.currentLanguage === 'ru' ? 'الإجمالي' : 'Total'}: 1.0000 TON
+                        ${App.currentLanguage === 'ru' ? 'Итого' : 'Total'}: 1.0000 TON
                     </div>
                     
                     <div style="background: rgba(0,0,0,0.2); border-radius: 14px; padding: 12px; margin-bottom: 16px;">
                         <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-                            <span style="font-size: 11px; color: var(--text-secondary);">${App.currentLanguage === 'ru' ? 'الرصيد المتوفر' : 'Your Balance'}</span>
+                            <span style="font-size: 11px; color: var(--text-secondary);">${App.currentLanguage === 'ru' ? 'Ваш баланс' : 'Your Balance'}</span>
                             <span style="font-weight: 700; color: var(--crystal-blue);" id="cowUserBalance">${formatTON(App.user?.tonBalance || 0)} TON</span>
                         </div>
                         <div style="display: flex; justify-content: space-between;">
-                            <span style="font-size: 11px; color: var(--text-secondary);">${App.currentLanguage === 'ru' ? 'الكمية المتوفرة عالمياً' : 'Global Available'}</span>
+                            <span style="font-size: 11px; color: var(--text-secondary);">${App.currentLanguage === 'ru' ? 'Глобально доступно' : 'Global Available'}</span>
                             <span style="font-weight: 700; color: var(--neon-green);">${App.global?.cows_remaining || 1000}</span>
                         </div>
                     </div>
                     
                     <div style="display: flex; gap: 10px;">
                         <button class="btn btn-secondary" onclick="document.getElementById('buyCowModal').remove()" style="flex: 1;">
-                            ${App.currentLanguage === 'ru' ? 'إلغاء' : 'Cancel'}
+                            ${App.currentLanguage === 'ru' ? 'Отмена' : 'Cancel'}
                         </button>
                         <button class="btn btn-primary" id="confirmBuyCowBtn" onclick="executeBuyCow()" style="flex: 1;">
-                            <i class="fas fa-shopping-cart"></i> ${App.currentLanguage === 'ru' ? 'شراء' : 'Buy'}
+                            <i class="fas fa-shopping-cart"></i> ${App.currentLanguage === 'ru' ? 'Купить' : 'Buy'}
                         </button>
                     </div>
                 </div>
@@ -5055,7 +5012,7 @@
         function updateCowTotal() {
             const quantity = parseInt(document.getElementById('buyCowQuantity').value) || 1;
             const total = quantity * 1;
-            document.getElementById('cowTotalPrice').innerHTML = `${App.currentLanguage === 'ru' ? 'الإجمالي' : 'Total'}: ${formatTON(total)} TON`;
+            document.getElementById('cowTotalPrice').innerHTML = `${App.currentLanguage === 'ru' ? 'Итого' : 'Total'}: ${formatTON(total)} TON`;
             
             const totalPrice = total;
             const userBalance = App.user?.tonBalance || 0;
@@ -5081,7 +5038,7 @@
             const quantity = parseInt(document.getElementById('buyCowQuantity').value) || 1;
             
             if (quantity <= 0) {
-                alert(App.currentLanguage === 'ru' ? 'الرجاء إدخال كمية صحيحة' : 'Please enter valid quantity');
+                alert(App.currentLanguage === 'ru' ? 'Пожалуйста, введите корректное количество' : 'Please enter valid quantity');
                 return;
             }
             
@@ -5093,7 +5050,7 @@
                 
                 showNotification(
                     App.currentLanguage === 'ru' ? 
-                    `✅ تم شراء ${result.quantity_bought} بقرة مقابل ${result.quantity_bought} TON` : 
+                    `✅ Куплено ${result.quantity_bought} коров(а) за ${result.quantity_bought} TON` : 
                     `✅ Bought ${result.quantity_bought} Cow(s) for ${result.quantity_bought} TON`,
                     'success'
                 );
@@ -5350,7 +5307,6 @@
             App.pendingTask = null;
         };
 
-        // Deposit functions
         window.initiateDeposit = async function() {
             if (!App.wallet) {
                 alert(App.currentLanguage === 'ru' ? 'Сначала подключите кошелек' : 'Connect wallet first');
@@ -5397,7 +5353,7 @@
                 
                 showNotification(
                     App.currentLanguage === 'ru' ? 
-                    '✅ Transaction sent! انتظر خلال 1 دقيقة سيتم إضافة الرصيد' : 
+                    '✅ Транзакция отправлена! Подождите около 1 минуты для зачисления' : 
                     '✅ Transaction sent! Wait about 1 minute for balance to be added',
                     'success'
                 );
@@ -5407,18 +5363,18 @@
             } catch (error) {
                 console.error('Deposit error:', error);
                 
-                let errorMessage = App.currentLanguage === 'ru' ? 'Transaction failed' : 'Transaction failed';
+                let errorMessage = App.currentLanguage === 'ru' ? 'Транзакция не удалась' : 'Transaction failed';
                 if (error.message?.includes('rejected')) {
-                    errorMessage = App.currentLanguage === 'ru' ? 'Transaction rejected in wallet' : 'Transaction rejected in wallet';
+                    errorMessage = App.currentLanguage === 'ru' ? 'Транзакция отклонена в кошельке' : 'Transaction rejected in wallet';
                 } else if (error.message?.includes('insufficient')) {
-                    errorMessage = App.currentLanguage === 'ru' ? 'Insufficient balance' : 'Insufficient balance';
+                    errorMessage = App.currentLanguage === 'ru' ? 'Недостаточно средств' : 'Insufficient balance';
                 }
                 
                 const statusDiv = document.getElementById('depositStatus');
                 statusDiv.classList.add('visible');
                 statusDiv.querySelector('.status-icon').innerHTML = '❌';
                 statusDiv.querySelector('.status-message').innerHTML = errorMessage;
-                document.getElementById('depositStatusDetail').innerHTML = error.message || (App.currentLanguage === 'ru' ? 'Please try again' : 'Please try again');
+                document.getElementById('depositStatusDetail').innerHTML = error.message || (App.currentLanguage === 'ru' ? 'Пожалуйста, попробуйте снова' : 'Please try again');
             }
         };
 
@@ -5437,9 +5393,9 @@
                 statusDiv.classList.add('visible');
                 statusDiv.querySelector('.status-icon').innerHTML = '⏳';
                 statusDiv.querySelector('.status-message').innerHTML = App.currentLanguage === 'ru' ? 
-                    'Transaction sent!' : 'Transaction sent!';
+                    'Транзакция отправлена!' : 'Transaction sent!';
                 document.getElementById('depositStatusDetail').innerHTML = App.currentLanguage === 'ru' ? 
-                    'Waiting for confirmation (≈1 min)...' : 'Waiting for confirmation (≈1 min)...';
+                    'Ожидание подтверждения (≈1 мин)...' : 'Waiting for confirmation (≈1 min)...';
                 
                 startDepositVerification(depositResult.depositId, result.boc);
                 
@@ -5450,7 +5406,7 @@
                 statusDiv.classList.add('visible');
                 statusDiv.querySelector('.status-icon').innerHTML = '❌';
                 statusDiv.querySelector('.status-message').innerHTML = App.currentLanguage === 'ru' ? 
-                    'Failed to process deposit' : 'Failed to process deposit';
+                    'Не удалось обработать депозит' : 'Failed to process deposit';
                 document.getElementById('depositStatusDetail').innerHTML = error.message;
             }
         }
@@ -5478,14 +5434,14 @@
                         const statusDiv = document.getElementById('depositStatus');
                         statusDiv.querySelector('.status-icon').innerHTML = '✅';
                         statusDiv.querySelector('.status-message').innerHTML = App.currentLanguage === 'ru' ? 
-                            'Deposit confirmed!' : 'Deposit confirmed!';
+                            'Депозит подтвержден!' : 'Deposit confirmed!';
                         document.getElementById('depositStatusDetail').innerHTML = App.currentLanguage === 'ru' ? 
-                            `${result.amount} TON added to your balance` : 
+                            `${result.amount} TON добавлено на баланс` : 
                             `${result.amount} TON added to your balance`;
                         
                         showNotification(
                             App.currentLanguage === 'ru' ? 
-                            `💰 Deposit confirmed! ${result.amount} TON added` : 
+                            `💰 Депозит подтвержден! ${result.amount} TON добавлено` : 
                             `💰 Deposit confirmed! ${result.amount} TON added`,
                             'success'
                         );
@@ -5505,9 +5461,9 @@
                         const statusDiv = document.getElementById('depositStatus');
                         statusDiv.querySelector('.status-icon').innerHTML = '⏳';
                         statusDiv.querySelector('.status-message').innerHTML = App.currentLanguage === 'ru' ? 
-                            'Still verifying...' : 'Still verifying...';
+                            'Все еще проверяется...' : 'Still verifying...';
                         document.getElementById('depositStatusDetail').innerHTML = App.currentLanguage === 'ru' ? 
-                            'Will be credited automatically' : 'Will be credited automatically';
+                            'Будет зачислено автоматически' : 'Will be credited automatically';
                     }
                     
                 } catch (error) {
@@ -5520,7 +5476,6 @@
             }, 10000);
         }
 
-        // Setup intervals
         function setupIntervals() {
             if (App.timerInterval) clearInterval(App.timerInterval);
             App.timerInterval = setInterval(() => {
@@ -5544,9 +5499,7 @@
             }, 30000);
         }
 
-        // Setup event listeners
         function setupEventListeners() {
-            // Navigation
             document.querySelectorAll('.nav-item').forEach(item => {
                 item.addEventListener('click', () => {
                     const sectionId = item.dataset.section;
@@ -5565,7 +5518,6 @@
                 });
             });
             
-            // Leaderboard button
             document.getElementById('leaderboardButton').addEventListener('click', function() {
                 document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
                 document.getElementById('sectionLeaderboard').classList.add('active');
@@ -5573,7 +5525,6 @@
                 loadGameState();
             });
             
-            // Language switcher
             document.querySelectorAll('.lang-btn').forEach(btn => {
                 btn.addEventListener('click', function() {
                     const lang = this.dataset.lang;
@@ -5587,7 +5538,6 @@
                 });
             });
             
-            // Market tabs
             document.querySelectorAll('[data-market-tab]').forEach(tab => {
                 tab.addEventListener('click', function() {
                     document.querySelectorAll('[data-market-tab]').forEach(t => t.classList.remove('active'));
@@ -5603,7 +5553,6 @@
                 });
             });
             
-            // Task tabs
             document.querySelectorAll('[data-task-tab]').forEach(tab => {
                 tab.addEventListener('click', function() {
                     document.querySelectorAll('[data-task-tab]').forEach(t => t.classList.remove('active'));
@@ -5614,7 +5563,6 @@
                 });
             });
             
-            // Resource switch
             document.querySelectorAll('[data-resource]').forEach(res => {
                 res.addEventListener('click', function() {
                     document.querySelectorAll('[data-resource]').forEach(r => r.classList.remove('active'));
@@ -5625,7 +5573,6 @@
                 });
             });
             
-            // Task type radio
             document.querySelectorAll('input[name="taskType"]').forEach(radio => {
                 radio.addEventListener('change', function() {
                     const note = document.getElementById('channelNote');
@@ -5633,7 +5580,6 @@
                 });
             });
             
-            // Refresh buttons
             document.getElementById('refreshMarketBtn').addEventListener('click', function() {
                 App.currentMarketPage = 1;
                 updateMarketUI(1, true);
@@ -5651,7 +5597,6 @@
                 }, 500);
             });
             
-            // Load more buttons
             document.getElementById('loadMoreSellBtn').addEventListener('click', function() {
                 App.currentMarketPage++;
                 updateMarketUI(App.currentMarketPage, false);
@@ -5660,7 +5605,6 @@
             document.getElementById('loadMoreReferralsBtn').addEventListener('click', loadMoreReferrals);
             document.getElementById('loadMoreEarningsBtn').addEventListener('click', loadMoreEarnings);
             
-            // Farm buttons
             document.getElementById('buyCowBtn').addEventListener('click', window.buyCow);
             document.getElementById('buyChickenBtn').addEventListener('click', window.buyChicken);
             document.getElementById('buyDiamondBtn').addEventListener('click', window.buyDiamondEngine);
@@ -5671,33 +5615,26 @@
             document.getElementById('hatchCowConfirm').addEventListener('click', window.hatchCow);
             document.getElementById('hatchChickenConfirm').addEventListener('click', window.hatchChicken);
             
-            // Crystal conversion
             document.getElementById('convertDiamondBtn').addEventListener('click', window.convertDiamond);
             document.getElementById('convertAmount').addEventListener('input', updateAllUI);
             
-            // Referral
             document.getElementById('copyReferralBtn').addEventListener('click', window.copyReferralLink);
             document.getElementById('claimReferralBtn').addEventListener('click', window.claimReferral);
             
-            // Withdraw
             document.getElementById('withdrawBtn').addEventListener('click', window.withdraw);
             document.getElementById('withdrawAmount').addEventListener('input', updateAllUI);
             
-            // Market
             document.getElementById('createSellOrderBtnTop').addEventListener('click', window.openSellOrderModal);
             document.getElementById('submitSellOrderBtn').addEventListener('click', window.createSellOrder);
             
-            // Deposit
             document.getElementById('depositButton').addEventListener('click', window.openDepositModal);
             document.getElementById('connectWalletBtn').addEventListener('click', connectWallet);
             document.getElementById('submitDepositBtn').addEventListener('click', window.initiateDeposit);
             
-            // Tasks
             document.getElementById('addTaskBtn').addEventListener('click', window.openAddTaskModal);
             document.getElementById('submitTaskBtn').addEventListener('click', window.createTask);
             document.getElementById('taskTarget').addEventListener('input', calculateTaskPrice);
             
-            // Preset buttons
             document.querySelectorAll('[data-sell-percent]').forEach(btn => {
                 btn.addEventListener('click', function() {
                     const percent = parseInt(this.dataset.sellPercent) / 100;
@@ -5722,7 +5659,6 @@
                 });
             });
             
-            // Help modal
             document.getElementById('helpButton').addEventListener('click', function() {
                 document.getElementById('helpModal').classList.add('active');
             });
@@ -5731,7 +5667,6 @@
                 document.getElementById('helpModal').classList.remove('active');
             });
             
-            // Close modals on overlay click
             document.querySelectorAll('.modal-overlay').forEach(modal => {
                 modal.addEventListener('click', function(e) {
                     if (e.target === this) {
@@ -5740,12 +5675,10 @@
                 });
             });
             
-            // Sell details input
             document.getElementById('sellQuantity').addEventListener('input', updateSellDetails);
             document.getElementById('sellTotalPrice').addEventListener('input', updateSellDetails);
         }
 
-        // Initialize app
         document.addEventListener('DOMContentLoaded', initApp);
     </script>
 </body>
