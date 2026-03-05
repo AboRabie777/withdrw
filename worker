@@ -7,6 +7,10 @@
 // ADDED: Leaderboard competition system (150 TON prizes based on cow ownership)
 // MODIFIED: Cow hatch cost increased to 10,000 Milk
 // MODIFIED: Leaderboard points system - new cows give 10 points, old cows give 1 point
+// ADDED: Cow leveling system with 3 levels
+// ADDED: Milk storage system with 10 levels
+// ADDED: Cow activation system (24h cycles)
+// ADDED: Ranch state management
 // ============================================
 
 export default {
@@ -302,6 +306,23 @@ export default {
                         result = await handleDistributeLeaderboardPrizes(env, userId);
                         break;
                     
+                    // ===== RANCH ACTIONS =====
+                    case 'getRanchState':
+                        result = await handleGetRanchState(env, userId);
+                        break;
+                    case 'activateCows':
+                        result = await handleActivateCows(env, userId, data);
+                        break;
+                    case 'upgradeCowLevel':
+                        result = await handleUpgradeCowLevel(env, userId, data);
+                        break;
+                    case 'claimMilk':
+                        result = await handleClaimMilk(env, userId);
+                        break;
+                    case 'upgradeMilkStorage':
+                        result = await handleUpgradeMilkStorage(env, userId);
+                        break;
+                    
                     default:
                         result = {
                             success: false,
@@ -411,14 +432,14 @@ function sanitizeInput(input) {
 }
 
 // ============================================
-// GAME CONSTANTS - MODIFIED
+// GAME CONSTANTS - MODIFIED WITH RANCH SYSTEM
 // ============================================
 
 const GAME_CONSTANTS = {
     COW_PRICE: 1,
     COW_GLOBAL_CAP: 1000,
     COW_PRODUCTION_RATE: 41,
-    COW_HATCH_COST: 10000, // MODIFIED: Changed from 5000 to 10000
+    COW_HATCH_COST: 10000,
     
     CHICKEN_PRICE: 1,
     CHICKEN_GLOBAL_CAP: 1000,
@@ -432,7 +453,7 @@ const GAME_CONSTANTS = {
     DIAMOND_BASE_PRICE: 25,
     
     MIN_ORDER_AMOUNT: 100,
-    MAX_ACTIVE_ORDERS: 2, // Maximum 2 active orders per user
+    MAX_ACTIVE_ORDERS: 2,
     MARKET_FEE_PERCENT: 10,
     
     MIN_WITHDRAW_AMOUNT: 0.1,
@@ -451,7 +472,6 @@ const GAME_CONSTANTS = {
     MAX_RETRY_ATTEMPTS: 3,
     RETRY_DELAY_MS: 100,
     
-    // ===== LEADERBOARD CONSTANTS - MODIFIED POINTS SYSTEM =====
     LEADERBOARD_COW_CAP: 1000,
     LEADERBOARD_TOTAL_PRIZE: 150,
     LEADERBOARD_PRIZES: {
@@ -477,9 +497,42 @@ const GAME_CONSTANTS = {
         20: 1
     },
     
-    // NEW: Points values for old and new cows
     OLD_COW_POINTS: 1,
-    NEW_COW_POINTS: 10
+    NEW_COW_POINTS: 10,
+    
+    // ===== NEW RANCH SYSTEM CONSTANTS =====
+    COW_LEVELS: {
+        1: {
+            productionPerDay: 500,
+            activationCost: 200,
+            upgradeCost: 0
+        },
+        2: {
+            productionPerDay: 1000,
+            activationCost: 350,
+            upgradeCost: 6000
+        },
+        3: {
+            productionPerDay: 2500,
+            activationCost: 1200,
+            upgradeCost: 20000
+        }
+    },
+    
+    STORAGE_LEVELS: {
+        1: { capacity: 2000, cost: 0 },
+        2: { capacity: 5000, cost: 2000 },
+        3: { capacity: 10000, cost: 5000 },
+        4: { capacity: 20000, cost: 10000 },
+        5: { capacity: 40000, cost: 20000 },
+        6: { capacity: 80000, cost: 40000 },
+        7: { capacity: 160000, cost: 80000 },
+        8: { capacity: 320000, cost: 160000 },
+        9: { capacity: 640000, cost: 320000 },
+        10: { capacity: 1000000, cost: 600000 }
+    },
+    
+    ACTIVATION_DURATION_HOURS: 24
 };
 
 const PARTNER_TASKS = [
@@ -514,7 +567,7 @@ const PARTNER_TASKS = [
 const ADMIN_IDS = ['123456789', '987654321'];
 
 // ============================================
-// LEADERBOARD FUNCTIONS - MODIFIED WITH NEW POINTS SYSTEM
+// LEADERBOARD FUNCTIONS
 // ============================================
 
 async function initializeLeaderboard(env) {
@@ -529,11 +582,10 @@ async function initializeLeaderboard(env) {
                 prizesDistributed: false,
                 lastUpdated: now,
                 createdAt: now,
-                newSystemStartTime: now, // Record when new system started
-                oldCowCounts: {} // Store old cow counts for users
+                newSystemStartTime: now,
+                oldCowCounts: {}
             });
         } else {
-            // Ensure newSystemStartTime exists
             const leaderboard = leaderboardResult.data;
             if (!leaderboard.newSystemStartTime) {
                 await dbUpdate(env, 'leaderboard', {
@@ -576,7 +628,7 @@ async function updateLeaderboard(env, userId, oldCowCount, newCowCount) {
         const userRecord = cowsData[userId] || {
             userId: userId,
             cowCount: 0,
-            points: 0, // Add points field
+            points: 0,
             achievedAt: now,
             firstName: '',
             lastName: '',
@@ -592,25 +644,19 @@ async function updateLeaderboard(env, userId, oldCowCount, newCowCount) {
             userRecord.photoUrl = userResult.data.photoUrl || '';
         }
         
-        // Calculate new points
         let oldPoints = userRecord.points || 0;
         let newPoints = oldPoints;
         
-        // If cow count increased (buy or hatch)
         if (currentCowCount > previousCowCount) {
             const cowsAdded = currentCowCount - previousCowCount;
             
-            // Get system start time
             const systemStartTime = leaderboard.newSystemStartTime || Date.now();
             
-            // Get stored old count
             const oldCowCounts = leaderboard.oldCowCounts || {};
             const userOldCount = oldCowCounts[userId] || previousCowCount;
             
-            // Calculate cows after new system
             const cowsAfterNewSystem = Math.max(0, currentCowCount - userOldCount);
             
-            // Points = old cows (1 point each) + new cows (10 points each)
             newPoints = userOldCount + (cowsAfterNewSystem * GAME_CONSTANTS.NEW_COW_POINTS);
             
             console.log(`Leaderboard update - User: ${userId}, Old count: ${userOldCount}, New count: ${currentCowCount}, Cows after new system: ${cowsAfterNewSystem}, New points: ${newPoints}`);
@@ -622,7 +668,6 @@ async function updateLeaderboard(env, userId, oldCowCount, newCowCount) {
         
         await dbSet(env, `leaderboard_cows/${userId}`, userRecord);
         
-        // Update last updated time
         await dbUpdate(env, 'leaderboard', {
             lastUpdated: now
         });
@@ -656,7 +701,6 @@ async function getLeaderboardData(env, currentUserId) {
         
         const usersArray = Object.values(cowsData);
         
-        // Sort by points, not cowCount
         usersArray.sort((a, b) => {
             if ((b.points || 0) !== (a.points || 0)) {
                 return (b.points || 0) - (a.points || 0);
@@ -672,7 +716,7 @@ async function getLeaderboardData(env, currentUserId) {
             username: user.username || '',
             photoUrl: user.photoUrl || '',
             cowCount: user.cowCount || 0,
-            points: user.points || 0, // Use calculated points
+            points: user.points || 0,
             prize: leaderboard.isActive ? 
                 (index < 20 ? GAME_CONSTANTS.LEADERBOARD_PRIZES[index + 1] || 0 : 0) : 
                 (user.prizeAwarded || 0)
@@ -733,7 +777,6 @@ async function finalizeLeaderboard(env) {
         
         const usersArray = Object.values(cowsData);
         
-        // Sort by points
         usersArray.sort((a, b) => {
             if ((b.points || 0) !== (a.points || 0)) {
                 return (b.points || 0) - (a.points || 0);
@@ -833,6 +876,710 @@ async function handleDistributeLeaderboardPrizes(env, userId) {
             errorCode: 'DISTRIBUTE_ERROR'
         };
     }
+}
+
+// ============================================
+// RANCH SYSTEM FUNCTIONS
+// ============================================
+
+async function initializeRanch(env, userId) {
+    try {
+        const ranchResult = await dbGet(env, `users/${userId}/ranch`);
+        
+        if (!ranchResult.success || !ranchResult.data) {
+            const now = Date.now();
+            const ranchData = {
+                cowLevels: {
+                    1: 0,
+                    2: 0,
+                    3: 0
+                },
+                cowActive: {
+                    1: 0,
+                    2: 0,
+                    3: 0
+                },
+                cowActiveUntil: {},
+                milkStored: 0,
+                storageLevel: 1,
+                lastProduction: now,
+                createdAt: now,
+                updatedAt: now
+            };
+            
+            await dbSet(env, `users/${userId}/ranch`, ranchData);
+            return ranchData;
+        }
+        
+        return ranchResult.data;
+        
+    } catch (error) {
+        console.error('Initialize ranch error:', error);
+        return null;
+    }
+}
+
+async function calculateRanchProduction(env, userId, ranch = null) {
+    try {
+        if (!ranch) {
+            const ranchResult = await dbGet(env, `users/${userId}/ranch`);
+            if (!ranchResult.success || !ranchResult.data) {
+                ranch = await initializeRanch(env, userId);
+            } else {
+                ranch = ranchResult.data;
+            }
+        }
+        
+        const now = Date.now();
+        const lastProduction = ranch.lastProduction || now;
+        
+        const msPassed = now - lastProduction;
+        const hoursPassed = msPassed / GAME_CONSTANTS.HOUR_IN_MS;
+        
+        if (hoursPassed <= 0) {
+            return {
+                ranch: ranch,
+                hoursPassed: 0,
+                milkProduced: 0,
+                productionStopped: false
+            };
+        }
+        
+        let milkProduced = 0;
+        
+        if (ranch.cowActive && ranch.cowActiveUntil) {
+            for (let level = 1; level <= 3; level++) {
+                const activeCount = ranch.cowActive[level] || 0;
+                const activeUntil = ranch.cowActiveUntil[level] || 0;
+                
+                if (activeCount > 0 && activeUntil > lastProduction) {
+                    const productionEnd = Math.min(activeUntil, now);
+                    const activeHours = Math.max(0, (productionEnd - lastProduction) / GAME_CONSTANTS.HOUR_IN_MS);
+                    
+                    const productionPerHour = GAME_CONSTANTS.COW_LEVELS[level].productionPerDay / 24;
+                    milkProduced += activeCount * productionPerHour * activeHours;
+                }
+            }
+        }
+        
+        const storageLevel = ranch.storageLevel || 1;
+        const storageCapacity = GAME_CONSTANTS.STORAGE_LEVELS[storageLevel].capacity;
+        
+        let newMilkStored = (ranch.milkStored || 0) + milkProduced;
+        let productionStopped = false;
+        
+        if (newMilkStored > storageCapacity) {
+            newMilkStored = storageCapacity;
+            productionStopped = true;
+        }
+        
+        const updates = {
+            milkStored: newMilkStored,
+            lastProduction: now,
+            updatedAt: now
+        };
+        
+        await dbUpdate(env, `users/${userId}/ranch`, updates);
+        
+        const updatedRanch = {
+            ...ranch,
+            ...updates
+        };
+        
+        return {
+            ranch: updatedRanch,
+            hoursPassed: hoursPassed,
+            milkProduced: milkProduced,
+            productionStopped: productionStopped
+        };
+        
+    } catch (error) {
+        console.error('Ranch production calculation error:', error);
+        return null;
+    }
+}
+
+async function handleGetRanchState(env, userId) {
+    try {
+        const ranchResult = await dbGet(env, `users/${userId}/ranch`);
+        let ranch;
+        
+        if (!ranchResult.success || !ranchResult.data) {
+            ranch = await initializeRanch(env, userId);
+        } else {
+            ranch = ranchResult.data;
+        }
+        
+        const productionResult = await calculateRanchProduction(env, userId, ranch);
+        
+        if (productionResult) {
+            ranch = productionResult.ranch;
+        }
+        
+        const storageLevel = ranch.storageLevel || 1;
+        const storageCapacity = GAME_CONSTANTS.STORAGE_LEVELS[storageLevel].capacity;
+        const milkStored = ranch.milkStored || 0;
+        
+        let hourlyProduction = 0;
+        if (ranch.cowActive && ranch.cowActiveUntil) {
+            const now = Date.now();
+            for (let level = 1; level <= 3; level++) {
+                const activeCount = ranch.cowActive[level] || 0;
+                const activeUntil = ranch.cowActiveUntil[level] || 0;
+                
+                if (activeCount > 0 && activeUntil > now) {
+                    const productionPerHour = GAME_CONSTANTS.COW_LEVELS[level].productionPerDay / 24;
+                    hourlyProduction += activeCount * productionPerHour;
+                }
+            }
+        }
+        
+        return {
+            success: true,
+            data: {
+                cowLevels: ranch.cowLevels || { 1: 0, 2: 0, 3: 0 },
+                cowActive: ranch.cowActive || { 1: 0, 2: 0, 3: 0 },
+                cowActiveUntil: ranch.cowActiveUntil || {},
+                hourlyProduction: Math.round(hourlyProduction * 100) / 100,
+                milkStored: milkStored,
+                storageCapacity: storageCapacity,
+                storageLevel: storageLevel,
+                storageFull: milkStored >= storageCapacity,
+                nextStorageCost: storageLevel < 10 ? GAME_CONSTANTS.STORAGE_LEVELS[storageLevel + 1].cost : null,
+                nextStorageCapacity: storageLevel < 10 ? GAME_CONSTANTS.STORAGE_LEVELS[storageLevel + 1].capacity : null
+            }
+        };
+        
+    } catch (error) {
+        console.error('Get ranch state error:', error);
+        return {
+            success: false,
+            error: error.message,
+            errorCode: 'GET_RANCH_STATE_ERROR'
+        };
+    }
+}
+
+async function handleActivateCows(env, userId, data) {
+    let attempt = 0;
+    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
+    
+    while (attempt < maxAttempts) {
+        try {
+            const { level, amount } = data;
+            const activateLevel = parseInt(level);
+            const activateAmount = parseInt(amount);
+            
+            if (![1, 2, 3].includes(activateLevel)) {
+                return {
+                    success: false,
+                    error: 'Invalid cow level',
+                    errorCode: 'INVALID_LEVEL'
+                };
+            }
+            
+            if (!activateAmount || activateAmount <= 0) {
+                return {
+                    success: false,
+                    error: 'Invalid amount',
+                    errorCode: 'INVALID_AMOUNT'
+                };
+            }
+            
+            const ranchResult = await dbGet(env, `users/${userId}/ranch`);
+            let ranch;
+            
+            if (!ranchResult.success || !ranchResult.data) {
+                ranch = await initializeRanch(env, userId);
+            } else {
+                ranch = ranchResult.data;
+            }
+            
+            const productionResult = await calculateRanchProduction(env, userId, ranch);
+            
+            if (productionResult) {
+                ranch = productionResult.ranch;
+            }
+            
+            const availableCows = (ranch.cowLevels || {})[activateLevel] || 0;
+            
+            if (availableCows < activateAmount) {
+                return {
+                    success: false,
+                    error: `Insufficient cows at level ${activateLevel}. You have ${availableCows}`,
+                    errorCode: 'INSUFFICIENT_COWS'
+                };
+            }
+            
+            const activationCost = GAME_CONSTANTS.COW_LEVELS[activateLevel].activationCost * activateAmount;
+            
+            const milkAtomicResult = await atomicUpdateUserResource(
+                env,
+                userId,
+                'milk',
+                activationCost
+            );
+            
+            if (!milkAtomicResult.success) {
+                if (milkAtomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
+                    attempt++;
+                    if (attempt < maxAttempts) {
+                        console.log(`Race condition detected for user ${userId} (activateCows), retry attempt ${attempt}/${maxAttempts}`);
+                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                        continue;
+                    } else {
+                        return {
+                            success: false,
+                            error: 'System busy, please try again',
+                            errorCode: 'RACE_CONDITION_MAX_RETRIES'
+                        };
+                    }
+                } else if (milkAtomicResult.errorCode === 'INSUFFICIENT_RESOURCE') {
+                    return {
+                        success: false,
+                        error: `Insufficient Milk. Need ${activationCost} Milk`,
+                        errorCode: 'INSUFFICIENT_MILK',
+                        currentBalance: milkAtomicResult.currentBalance
+                    };
+                } else {
+                    return {
+                        success: false,
+                        error: milkAtomicResult.error,
+                        errorCode: milkAtomicResult.errorCode || 'ATOMIC_UPDATE_FAILED'
+                    };
+                }
+            }
+            
+            const cowLevels = ranch.cowLevels || { 1: 0, 2: 0, 3: 0 };
+            const cowActive = ranch.cowActive || { 1: 0, 2: 0, 3: 0 };
+            const cowActiveUntil = ranch.cowActiveUntil || {};
+            
+            cowLevels[activateLevel] -= activateAmount;
+            
+            const now = Date.now();
+            const activeUntil = now + (GAME_CONSTANTS.ACTIVATION_DURATION_HOURS * GAME_CONSTANTS.HOUR_IN_MS);
+            
+            if (cowActiveUntil[activateLevel] && cowActiveUntil[activateLevel] > now) {
+                cowActive[activateLevel] += activateAmount;
+            } else {
+                cowActive[activateLevel] = activateAmount;
+                cowActiveUntil[activateLevel] = activeUntil;
+            }
+            
+            const ranchUpdates = {
+                cowLevels: cowLevels,
+                cowActive: cowActive,
+                cowActiveUntil: cowActiveUntil,
+                updatedAt: now
+            };
+            
+            await dbUpdate(env, `users/${userId}/ranch`, ranchUpdates);
+            
+            await dbPush(env, `users/${userId}/transactions`, {
+                type: 'activate_cows',
+                level: activateLevel,
+                amount: activateAmount,
+                activationCost: activationCost,
+                activeUntil: activeUntil,
+                timestamp: now
+            });
+            
+            return {
+                success: true,
+                data: {
+                    activated: activateAmount,
+                    level: activateLevel,
+                    activeUntil: activeUntil,
+                    activationCost: activationCost,
+                    newMilkBalance: milkAtomicResult.data.newBalance
+                }
+            };
+            
+        } catch (error) {
+            console.error(`Activate cows error (attempt ${attempt + 1}):`, error);
+            attempt++;
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+            } else {
+                return {
+                    success: false,
+                    error: error.message,
+                    errorCode: 'ACTIVATE_COWS_ERROR'
+                };
+            }
+        }
+    }
+    
+    return {
+        success: false,
+        error: 'Maximum retry attempts exceeded',
+        errorCode: 'MAX_RETRIES_EXCEEDED'
+    };
+}
+
+async function handleUpgradeCowLevel(env, userId, data) {
+    let attempt = 0;
+    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
+    
+    while (attempt < maxAttempts) {
+        try {
+            const { fromLevel, amount } = data;
+            const upgradeFromLevel = parseInt(fromLevel);
+            const upgradeAmount = parseInt(amount);
+            
+            if (![1, 2].includes(upgradeFromLevel)) {
+                return {
+                    success: false,
+                    error: 'Can only upgrade from level 1 or 2',
+                    errorCode: 'INVALID_LEVEL'
+                };
+            }
+            
+            if (!upgradeAmount || upgradeAmount <= 0) {
+                return {
+                    success: false,
+                    error: 'Invalid amount',
+                    errorCode: 'INVALID_AMOUNT'
+                };
+            }
+            
+            const ranchResult = await dbGet(env, `users/${userId}/ranch`);
+            let ranch;
+            
+            if (!ranchResult.success || !ranchResult.data) {
+                ranch = await initializeRanch(env, userId);
+            } else {
+                ranch = ranchResult.data;
+            }
+            
+            const productionResult = await calculateRanchProduction(env, userId, ranch);
+            
+            if (productionResult) {
+                ranch = productionResult.ranch;
+            }
+            
+            const availableCows = (ranch.cowLevels || {})[upgradeFromLevel] || 0;
+            
+            if (availableCows < upgradeAmount) {
+                return {
+                    success: false,
+                    error: `Insufficient cows at level ${upgradeFromLevel}. You have ${availableCows}`,
+                    errorCode: 'INSUFFICIENT_COWS'
+                };
+            }
+            
+            const upgradeCost = GAME_CONSTANTS.COW_LEVELS[upgradeFromLevel + 1].upgradeCost * upgradeAmount;
+            
+            const milkAtomicResult = await atomicUpdateUserResource(
+                env,
+                userId,
+                'milk',
+                upgradeCost
+            );
+            
+            if (!milkAtomicResult.success) {
+                if (milkAtomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
+                    attempt++;
+                    if (attempt < maxAttempts) {
+                        console.log(`Race condition detected for user ${userId} (upgradeCowLevel), retry attempt ${attempt}/${maxAttempts}`);
+                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                        continue;
+                    } else {
+                        return {
+                            success: false,
+                            error: 'System busy, please try again',
+                            errorCode: 'RACE_CONDITION_MAX_RETRIES'
+                        };
+                    }
+                } else if (milkAtomicResult.errorCode === 'INSUFFICIENT_RESOURCE') {
+                    return {
+                        success: false,
+                        error: `Insufficient Milk. Need ${upgradeCost} Milk`,
+                        errorCode: 'INSUFFICIENT_MILK',
+                        currentBalance: milkAtomicResult.currentBalance
+                    };
+                } else {
+                    return {
+                        success: false,
+                        error: milkAtomicResult.error,
+                        errorCode: milkAtomicResult.errorCode || 'ATOMIC_UPDATE_FAILED'
+                    };
+                }
+            }
+            
+            const cowLevels = ranch.cowLevels || { 1: 0, 2: 0, 3: 0 };
+            
+            cowLevels[upgradeFromLevel] -= upgradeAmount;
+            cowLevels[upgradeFromLevel + 1] += upgradeAmount;
+            
+            const ranchUpdates = {
+                cowLevels: cowLevels,
+                updatedAt: Date.now()
+            };
+            
+            await dbUpdate(env, `users/${userId}/ranch`, ranchUpdates);
+            
+            await dbPush(env, `users/${userId}/transactions`, {
+                type: 'upgrade_cows',
+                fromLevel: upgradeFromLevel,
+                toLevel: upgradeFromLevel + 1,
+                amount: upgradeAmount,
+                upgradeCost: upgradeCost,
+                timestamp: Date.now()
+            });
+            
+            return {
+                success: true,
+                data: {
+                    upgraded: upgradeAmount,
+                    fromLevel: upgradeFromLevel,
+                    toLevel: upgradeFromLevel + 1,
+                    upgradeCost: upgradeCost,
+                    newCowLevels: cowLevels,
+                    newMilkBalance: milkAtomicResult.data.newBalance
+                }
+            };
+            
+        } catch (error) {
+            console.error(`Upgrade cow level error (attempt ${attempt + 1}):`, error);
+            attempt++;
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+            } else {
+                return {
+                    success: false,
+                    error: error.message,
+                    errorCode: 'UPGRADE_COW_LEVEL_ERROR'
+                };
+            }
+        }
+    }
+    
+    return {
+        success: false,
+        error: 'Maximum retry attempts exceeded',
+        errorCode: 'MAX_RETRIES_EXCEEDED'
+    };
+}
+
+async function handleClaimMilk(env, userId) {
+    let attempt = 0;
+    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
+    
+    while (attempt < maxAttempts) {
+        try {
+            const ranchResult = await dbGet(env, `users/${userId}/ranch`);
+            let ranch;
+            
+            if (!ranchResult.success || !ranchResult.data) {
+                ranch = await initializeRanch(env, userId);
+            } else {
+                ranch = ranchResult.data;
+            }
+            
+            const productionResult = await calculateRanchProduction(env, userId, ranch);
+            
+            if (productionResult) {
+                ranch = productionResult.ranch;
+            }
+            
+            const milkStored = ranch.milkStored || 0;
+            
+            if (milkStored <= 0) {
+                return {
+                    success: false,
+                    error: 'No milk stored to claim',
+                    errorCode: 'NO_MILK_STORED'
+                };
+            }
+            
+            const milkAtomicResult = await atomicUpdateUserResource(
+                env,
+                userId,
+                'milk',
+                -milkStored
+            );
+            
+            if (!milkAtomicResult.success) {
+                if (milkAtomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
+                    attempt++;
+                    if (attempt < maxAttempts) {
+                        console.log(`Race condition detected for user ${userId} (claimMilk), retry attempt ${attempt}/${maxAttempts}`);
+                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                        continue;
+                    } else {
+                        return {
+                            success: false,
+                            error: 'System busy, please try again',
+                            errorCode: 'RACE_CONDITION_MAX_RETRIES'
+                        };
+                    }
+                } else {
+                    return {
+                        success: false,
+                        error: milkAtomicResult.error,
+                        errorCode: milkAtomicResult.errorCode || 'ATOMIC_UPDATE_FAILED'
+                    };
+                }
+            }
+            
+            await dbUpdate(env, `users/${userId}/ranch`, {
+                milkStored: 0,
+                updatedAt: Date.now()
+            });
+            
+            await dbPush(env, `users/${userId}/transactions`, {
+                type: 'claim_milk',
+                amount: milkStored,
+                timestamp: Date.now()
+            });
+            
+            return {
+                success: true,
+                data: {
+                    claimed: milkStored,
+                    newMilkBalance: milkAtomicResult.data.newBalance
+                }
+            };
+            
+        } catch (error) {
+            console.error(`Claim milk error (attempt ${attempt + 1}):`, error);
+            attempt++;
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+            } else {
+                return {
+                    success: false,
+                    error: error.message,
+                    errorCode: 'CLAIM_MILK_ERROR'
+                };
+            }
+        }
+    }
+    
+    return {
+        success: false,
+        error: 'Maximum retry attempts exceeded',
+        errorCode: 'MAX_RETRIES_EXCEEDED'
+    };
+}
+
+async function handleUpgradeMilkStorage(env, userId) {
+    let attempt = 0;
+    const maxAttempts = GAME_CONSTANTS.MAX_RETRY_ATTEMPTS;
+    
+    while (attempt < maxAttempts) {
+        try {
+            const ranchResult = await dbGet(env, `users/${userId}/ranch`);
+            let ranch;
+            
+            if (!ranchResult.success || !ranchResult.data) {
+                ranch = await initializeRanch(env, userId);
+            } else {
+                ranch = ranchResult.data;
+            }
+            
+            const productionResult = await calculateRanchProduction(env, userId, ranch);
+            
+            if (productionResult) {
+                ranch = productionResult.ranch;
+            }
+            
+            const currentLevel = ranch.storageLevel || 1;
+            
+            if (currentLevel >= 10) {
+                return {
+                    success: false,
+                    error: 'Storage already at maximum level',
+                    errorCode: 'MAX_STORAGE_LEVEL'
+                };
+            }
+            
+            const nextLevel = currentLevel + 1;
+            const upgradeCost = GAME_CONSTANTS.STORAGE_LEVELS[nextLevel].cost;
+            const newCapacity = GAME_CONSTANTS.STORAGE_LEVELS[nextLevel].capacity;
+            
+            const milkAtomicResult = await atomicUpdateUserResource(
+                env,
+                userId,
+                'milk',
+                upgradeCost
+            );
+            
+            if (!milkAtomicResult.success) {
+                if (milkAtomicResult.errorCode === 'RACE_CONDITION_DETECTED') {
+                    attempt++;
+                    if (attempt < maxAttempts) {
+                        console.log(`Race condition detected for user ${userId} (upgradeMilkStorage), retry attempt ${attempt}/${maxAttempts}`);
+                        await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+                        continue;
+                    } else {
+                        return {
+                            success: false,
+                            error: 'System busy, please try again',
+                            errorCode: 'RACE_CONDITION_MAX_RETRIES'
+                        };
+                    }
+                } else if (milkAtomicResult.errorCode === 'INSUFFICIENT_RESOURCE') {
+                    return {
+                        success: false,
+                        error: `Insufficient Milk. Need ${upgradeCost} Milk`,
+                        errorCode: 'INSUFFICIENT_MILK',
+                        currentBalance: milkAtomicResult.currentBalance
+                    };
+                } else {
+                    return {
+                        success: false,
+                        error: milkAtomicResult.error,
+                        errorCode: milkAtomicResult.errorCode || 'ATOMIC_UPDATE_FAILED'
+                    };
+                }
+            }
+            
+            await dbUpdate(env, `users/${userId}/ranch`, {
+                storageLevel: nextLevel,
+                updatedAt: Date.now()
+            });
+            
+            await dbPush(env, `users/${userId}/transactions`, {
+                type: 'upgrade_storage',
+                fromLevel: currentLevel,
+                toLevel: nextLevel,
+                upgradeCost: upgradeCost,
+                newCapacity: newCapacity,
+                timestamp: Date.now()
+            });
+            
+            return {
+                success: true,
+                data: {
+                    newLevel: nextLevel,
+                    capacity: newCapacity,
+                    upgradeCost: upgradeCost,
+                    newMilkBalance: milkAtomicResult.data.newBalance
+                }
+            };
+            
+        } catch (error) {
+            console.error(`Upgrade milk storage error (attempt ${attempt + 1}):`, error);
+            attempt++;
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, GAME_CONSTANTS.RETRY_DELAY_MS * attempt));
+            } else {
+                return {
+                    success: false,
+                    error: error.message,
+                    errorCode: 'UPGRADE_STORAGE_ERROR'
+                };
+            }
+        }
+    }
+    
+    return {
+        success: false,
+        error: 'Maximum retry attempts exceeded',
+        errorCode: 'MAX_RETRIES_EXCEEDED'
+    };
 }
 
 // ============================================
@@ -1513,6 +2260,9 @@ async function initializeUser(env, userId, userInfo = {}, startParam = null) {
     
     await dbSet(env, `users/${userId}`, userData);
     
+    // Initialize ranch data
+    await initializeRanch(env, userId);
+    
     if (referredBy) {
         await recordReferral(env, referredBy, userId, userData);
     }
@@ -1785,6 +2535,29 @@ async function handleBuyCow(env, userId, data) {
             
             await dbUpdate(env, `users/${userId}`, userUpdates);
             await dbUpdate(env, 'global', globalUpdates);
+            
+            // Add cows to ranch system (level 1 cows)
+            const ranchResult = await dbGet(env, `users/${userId}/ranch`);
+            if (ranchResult.success && ranchResult.data) {
+                const ranch = ranchResult.data;
+                const cowLevels = ranch.cowLevels || { 1: 0, 2: 0, 3: 0 };
+                cowLevels[1] += buyQuantity;
+                
+                await dbUpdate(env, `users/${userId}/ranch`, {
+                    cowLevels: cowLevels,
+                    updatedAt: Date.now()
+                });
+            } else {
+                await initializeRanch(env, userId);
+                const ranch = await dbGet(env, `users/${userId}/ranch`);
+                if (ranch.success && ranch.data) {
+                    const cowLevels = { 1: buyQuantity, 2: 0, 3: 0 };
+                    await dbUpdate(env, `users/${userId}/ranch`, {
+                        cowLevels: cowLevels,
+                        updatedAt: Date.now()
+                    });
+                }
+            }
             
             // Update leaderboard
             await updateLeaderboard(env, userId, user.cows_owned || 0, (user.cows_owned || 0) + buyQuantity);
@@ -2209,7 +2982,7 @@ async function handleHatchCow(env, userId, data) {
                 user = productionResult.user;
             }
             
-            const milkNeeded = GAME_CONSTANTS.COW_HATCH_COST * hatchAmount; // Now 10,000 * amount
+            const milkNeeded = GAME_CONSTANTS.COW_HATCH_COST * hatchAmount;
             
             const atomicResult = await atomicUpdateUserResource(
                 env,
@@ -2255,7 +3028,30 @@ async function handleHatchCow(env, userId, data) {
             
             await dbUpdate(env, `users/${userId}`, userUpdates);
             
-            // Update leaderboard for hatched cows (these count as new cows with 10 points)
+            // Add hatched cows to ranch system (level 1 cows)
+            const ranchResult = await dbGet(env, `users/${userId}/ranch`);
+            if (ranchResult.success && ranchResult.data) {
+                const ranch = ranchResult.data;
+                const cowLevels = ranch.cowLevels || { 1: 0, 2: 0, 3: 0 };
+                cowLevels[1] += hatchAmount;
+                
+                await dbUpdate(env, `users/${userId}/ranch`, {
+                    cowLevels: cowLevels,
+                    updatedAt: Date.now()
+                });
+            } else {
+                await initializeRanch(env, userId);
+                const ranch = await dbGet(env, `users/${userId}/ranch`);
+                if (ranch.success && ranch.data) {
+                    const cowLevels = { 1: hatchAmount, 2: 0, 3: 0 };
+                    await dbUpdate(env, `users/${userId}/ranch`, {
+                        cowLevels: cowLevels,
+                        updatedAt: Date.now()
+                    });
+                }
+            }
+            
+            // Update leaderboard for hatched cows
             await updateLeaderboard(env, userId, user.cows_owned || 0, (user.cows_owned || 0) + hatchAmount);
             
             await dbPush(env, `users/${userId}/transactions`, {
@@ -4739,6 +5535,7 @@ async function handleGetState(env, userId) {
     try {
         const userResult = await dbGet(env, `users/${userId}`);
         const globalResult = await dbGet(env, 'global');
+        const ranchResult = await dbGet(env, `users/${userId}/ranch`);
         
         let global = globalResult.data;
         
@@ -4779,6 +5576,17 @@ async function handleGetState(env, userId) {
                 activeOrdersCount: 0,
                 completedTasks: []
             };
+        }
+        
+        // Calculate ranch production
+        let ranch = ranchResult.data;
+        if (ranch) {
+            const ranchProduction = await calculateRanchProduction(env, userId, ranch);
+            if (ranchProduction) {
+                ranch = ranchProduction.ranch;
+            }
+        } else {
+            ranch = await initializeRanch(env, userId);
         }
         
         let referralStats = {
@@ -4904,7 +5712,6 @@ async function handleGetState(env, userId) {
         const tasksResult = await handleGetTasks(env, userId);
         let tasks = tasksResult.success ? tasksResult.data : { partner: [], community: [] };
         
-        // ===== Get Leaderboard Data with Global Cow Sales =====
         const leaderboardResult = await getLeaderboardData(env, userId);
         const leaderboard = leaderboardResult.success ? leaderboardResult.data : {
             isActive: true,
@@ -4926,6 +5733,25 @@ async function handleGetState(env, userId) {
         const secondsUntilNext = Math.floor(msUntilNext / 1000);
         const minutesUntilNext = Math.floor(secondsUntilNext / 60);
         const secondsRemaining = secondsUntilNext % 60;
+        
+        // Calculate ranch hourly production
+        let ranchHourlyProduction = 0;
+        if (ranch && ranch.cowActive && ranch.cowActiveUntil) {
+            const now = Date.now();
+            for (let level = 1; level <= 3; level++) {
+                const activeCount = ranch.cowActive[level] || 0;
+                const activeUntil = ranch.cowActiveUntil[level] || 0;
+                
+                if (activeCount > 0 && activeUntil > now) {
+                    const productionPerHour = GAME_CONSTANTS.COW_LEVELS[level].productionPerDay / 24;
+                    ranchHourlyProduction += activeCount * productionPerHour;
+                }
+            }
+        }
+        
+        const storageLevel = ranch?.storageLevel || 1;
+        const storageCapacity = GAME_CONSTANTS.STORAGE_LEVELS[storageLevel].capacity;
+        const milkStored = ranch?.milkStored || 0;
         
         return {
             success: true,
@@ -4984,10 +5810,23 @@ async function handleGetState(env, userId) {
                     chickens_until_diamond: Math.max(0, GAME_CONSTANTS.CHICKEN_GLOBAL_CAP - (global.chickens_sold || 0))
                 },
                 
+                ranch: {
+                    cowLevels: ranch?.cowLevels || { 1: 0, 2: 0, 3: 0 },
+                    cowActive: ranch?.cowActive || { 1: 0, 2: 0, 3: 0 },
+                    cowActiveUntil: ranch?.cowActiveUntil || {},
+                    hourlyProduction: Math.round(ranchHourlyProduction * 100) / 100,
+                    milkStored: milkStored,
+                    storageCapacity: storageCapacity,
+                    storageLevel: storageLevel,
+                    storageFull: milkStored >= storageCapacity,
+                    nextStorageCost: storageLevel < 10 ? GAME_CONSTANTS.STORAGE_LEVELS[storageLevel + 1].cost : null,
+                    nextStorageCapacity: storageLevel < 10 ? GAME_CONSTANTS.STORAGE_LEVELS[storageLevel + 1].capacity : null
+                },
+                
                 constants: {
                     COW_PRICE: GAME_CONSTANTS.COW_PRICE,
                     COW_PRODUCTION_RATE: GAME_CONSTANTS.COW_PRODUCTION_RATE,
-                    COW_HATCH_COST: GAME_CONSTANTS.COW_HATCH_COST, // Now 10,000
+                    COW_HATCH_COST: GAME_CONSTANTS.COW_HATCH_COST,
                     
                     CHICKEN_PRICE: GAME_CONSTANTS.CHICKEN_PRICE,
                     CHICKEN_PRODUCTION_RATE: GAME_CONSTANTS.CHICKEN_PRODUCTION_RATE,
@@ -5010,14 +5849,17 @@ async function handleGetState(env, userId) {
                     MAX_RETRY_ATTEMPTS: GAME_CONSTANTS.MAX_RETRY_ATTEMPTS,
                     MAX_ACTIVE_ORDERS: GAME_CONSTANTS.MAX_ACTIVE_ORDERS,
                     
-                    // Leaderboard constants
                     LEADERBOARD_COW_CAP: GAME_CONSTANTS.LEADERBOARD_COW_CAP,
                     LEADERBOARD_TOTAL_PRIZE: GAME_CONSTANTS.LEADERBOARD_TOTAL_PRIZE,
                     LEADERBOARD_PRIZES: GAME_CONSTANTS.LEADERBOARD_PRIZES,
                     
-                    // Points system
                     OLD_COW_POINTS: GAME_CONSTANTS.OLD_COW_POINTS,
-                    NEW_COW_POINTS: GAME_CONSTANTS.NEW_COW_POINTS
+                    NEW_COW_POINTS: GAME_CONSTANTS.NEW_COW_POINTS,
+                    
+                    // Ranch constants
+                    COW_LEVELS: GAME_CONSTANTS.COW_LEVELS,
+                    STORAGE_LEVELS: GAME_CONSTANTS.STORAGE_LEVELS,
+                    ACTIVATION_DURATION_HOURS: GAME_CONSTANTS.ACTIVATION_DURATION_HOURS
                 },
                 
                 referral: referralStats,
