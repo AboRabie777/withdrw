@@ -319,8 +319,8 @@ async function sendTONWithRetry(toAddress, amount, retryCount = 0) {
         internal({
           to: toAddress,
           value: nanoAmount,
-          bounce: true, // رجوع للـ true لأنك كنت مستخدم bounce
-          body: "@Crystal_Ranch_bot" // ✅ تم إعادة النص الأصلي
+          bounce: true,
+          body: "@Crystal_Ranch_bot"
         }),
       ],
     });
@@ -433,7 +433,7 @@ async function sendChannelNotification(amount, toAddress, userId) {
 }
 
 // ==========================
-// 🔹 معالجة سحب واحد مع إعادة المحاولة
+// 🔹 معالجة سحب واحد مع إعادة المحاولة (تم التعديل هنا)
 // ==========================
 
 async function processWithdrawal(withdrawId, data) {
@@ -455,7 +455,7 @@ async function processWithdrawal(withdrawId, data) {
     
     const roundedAmount = roundAmount(data.netAmount);
     
-    // التحقق من الحد الأقصى (10 TON كما كنت)
+    // التحقق من الحد الأقصى (10 TON)
     if (roundedAmount > 10) {
       console.log(`⏭️ Amount exceeds limit: ${roundedAmount} TON`);
       await db.ref(`withdrawals/${withdrawId}`).update({
@@ -477,14 +477,12 @@ async function processWithdrawal(withdrawId, data) {
       return true;
     }
 
-    // استخراج User ID
-    let userId = null;
-    if (withdrawId.startsWith("wd_")) {
-      const parts = withdrawId.split("_");
-      if (parts.length >= 3) {
-        userId = parts[2];
-        console.log(`✅ User ID: ${userId}`);
-      }
+    // ✅ التعديل الأساسي: قراءة User ID مباشرة من البيانات
+    let userId = data.userId || null;
+    if (userId) {
+      console.log(`✅ User ID from data: ${userId}`);
+    } else {
+      console.log(`⚠️ No userId found in withdrawal data`);
     }
 
     // تحديث إلى processing
@@ -510,10 +508,12 @@ async function processWithdrawal(withdrawId, data) {
     
     console.log(`✅ Completed: ${withdrawId}`);
 
-    // إرسال الإشعارات
+    // ✅ إرسال الإشعارات باستخدام userId الحقيقي
     if (userId) {
       await sendUserNotification(userId, result.amount, data.address);
       await sendChannelNotification(result.amount, data.address, userId);
+    } else {
+      console.log(`⚠️ Skipping notifications: No userId found`);
     }
     
     return true;
@@ -836,11 +836,11 @@ getWallet().then(async () => {
 // 🔹 تشغيل المعالجة الدورية
 // ==========================
 
-// معالجة كل 60 ثانية (بدلاً من 30 ثانية عشان نقلل الضغط)
+// معالجة كل 60 ثانية
 setInterval(async () => {
   console.log("\n⏰ Running scheduled check for pending withdrawals...");
   await processPendingWithdrawals();
-}, 60000); // 60 ثانية
+}, 60000);
 
 // التحقق الدوري من الرصيد كل 15 دقيقة
 setInterval(async () => {
