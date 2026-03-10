@@ -353,12 +353,15 @@ async function sendTONWithRetry(toAddress, amount, retryCount = 0) {
 }
 
 // ==========================
-// 🔹 إرسال إشعار للمستخدم
+// 🔹 إرسال إشعار للمستخدم (محسّن)
 // ==========================
 
 async function sendUserNotification(chatId, amount, toAddress) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
-  if (!botToken || !chatId) return false;
+  if (!botToken || !chatId) {
+    console.log(`❌ Cannot send notification: missing botToken or chatId`);
+    return false;
+  }
 
   const walletLink = `https://tonviewer.com/${toAddress}`;
   
@@ -373,16 +376,30 @@ Your funds have been delivered.`;
   const payload = {
     chat_id: chatId,
     text: userMessage,
+    parse_mode: 'HTML',
+    disable_web_page_preview: false
   };
 
   try {
-    await fetch(url, {
+    console.log(`📤 Sending notification to Telegram user ${chatId}...`);
+    
+    const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    return true;
+    
+    const data = await response.json();
+    
+    if (data.ok) {
+      console.log(`✅ User notification sent successfully to ${chatId}`);
+      return true;
+    } else {
+      console.log(`❌ Telegram API error: ${data.description}`);
+      return false;
+    }
   } catch (error) {
+    console.log(`❌ Error sending user notification: ${error.message}`);
     return false;
   }
 }
@@ -426,6 +443,8 @@ async function sendChannelNotification(amount, toAddress, userId) {
     
     if (data.ok && data.result) {
       console.log(`✅ Channel notification sent to topic #${topicId}`);
+    } else {
+      console.log(`❌ Channel notification failed: ${data.description}`);
     }
   } catch (error) {
     console.log(`❌ Error sending channel notification: ${error.message}`);
@@ -433,7 +452,7 @@ async function sendChannelNotification(amount, toAddress, userId) {
 }
 
 // ==========================
-// 🔹 معالجة سحب واحد مع إعادة المحاولة (تم التعديل هنا)
+// 🔹 معالجة سحب واحد مع إعادة المحاولة (نسخة محسّنة)
 // ==========================
 
 async function processWithdrawal(withdrawId, data) {
@@ -477,12 +496,21 @@ async function processWithdrawal(withdrawId, data) {
       return true;
     }
 
-    // ✅ التعديل الأساسي: قراءة User ID مباشرة من البيانات
+    // ✅ قراءة User ID مباشرة من البيانات (وهي موجودة فعلاً)
     let userId = data.userId || null;
+    
+    // ✅ التأكد من وجود userId قبل المتابعة
     if (userId) {
-      console.log(`✅ User ID from data: ${userId}`);
+      console.log(`✅✅✅ User ID found in database: ${userId}`);
     } else {
-      console.log(`⚠️ No userId found in withdrawal data`);
+      console.log(`❌❌❌ CRITICAL ERROR: userId field is missing in database for ${withdrawId}`);
+      console.log(`📦 Available fields in data:`, Object.keys(data).join(', '));
+      
+      // تحديث الحالة ولكن لا نوقف العملية لأن السحب نفسه ممكن يتم
+      await db.ref(`withdrawals/${withdrawId}`).update({
+        warning: "Missing userId field",
+        updatedAt: Date.now()
+      });
     }
 
     // تحديث إلى processing
@@ -493,6 +521,7 @@ async function processWithdrawal(withdrawId, data) {
     });
 
     // إرسال TON مع إعادة المحاولة
+    console.log(`💰 Preparing to send ${roundedAmount} TON to ${data.address.substring(0,8)}...`);
     const result = await sendTONWithRetry(data.address, roundedAmount);
 
     // تحديث إلى paid
@@ -506,20 +535,57 @@ async function processWithdrawal(withdrawId, data) {
       balanceBefore: data.balanceBefore || null
     });
     
-    console.log(`✅ Completed: ${withdrawId}`);
+    console.log(`✅ Transaction completed for: ${withdrawId}`);
 
-    // ✅ إرسال الإشعارات باستخدام userId الحقيقي
+    // ✅ إرسال الإشعارات للمستخدم إذا كان userId موجوداً
     if (userId) {
-      await sendUserNotification(userId, result.amount, data.address);
+      console.log(`📨 Attempting to send notification to user ${userId}...`);
+      
+      const notificationSent = await sendUserNotification(userId, result.amount, data.address);
+      
+      if (notificationSent) {
+        console.log(`✅ User notification sent successfully to ${userId}`);
+      } else {
+        console.log(`❌ Failed to send notification to user ${userId} - check bot token or if user blocked the bot`);
+      }
+      
+      // إرسال إشعار القناة (لا يعتمد على نجاح إشعار المستخدم)
       await sendChannelNotification(result.amount, data.address, userId);
+      console.log(`✅ Channel notification sent for user ${userId}`);
     } else {
-      console.log(`⚠️ Skipping notifications: No userId found`);
+      console.log(`⚠️ Cannot send notifications: No userId available for ${withdrawId}`);
+      
+      // إرسال إشعار للمشرف بوجود سحب بدون userId
+      const botToken = process.env.TELEGRAM_BOT_TOKEN;
+      if (botToken) {
+        const adminMessage = `⚠️ Withdrawal completed but no userId found\n\n` +
+          `ID: ${withdrawId}\n` +
+          `Amount: ${result.amount} TON\n` +
+          `Address: ${data.address}`;
+        
+        const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+        const payload = {
+          chat_id: ADMIN_CHAT_ID,
+          text: adminMessage,
+        };
+        
+        try {
+          await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          console.log(`✅ Admin notification sent about missing userId`);
+        } catch (e) {
+          console.log(`❌ Failed to send admin notification: ${e.message}`);
+        }
+      }
     }
     
     return true;
 
   } catch (error) {
-    console.log(`❌ Failed: ${error.message}`);
+    console.log(`❌ Failed to process withdrawal: ${error.message}`);
     
     // زيادة عداد المحاولات
     const attempts = (data.attempts || 0) + 1;
@@ -661,7 +727,7 @@ async function processPendingWithdrawals() {
 }
 
 // ==========================
-// 🔹 بوت الترحيب (معدل للاحتفاظ بكل الوظائف)
+// 🔹 بوت الترحيب
 // ==========================
 
 function startWelcomeBot() {
