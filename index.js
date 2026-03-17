@@ -56,10 +56,10 @@ const BALANCE_WARNING_INTERVAL = 30 * 60 * 1000;
 // 🔹 إعدادات المعالجة
 // ==========================
 
-const MAX_RETRIES = 3; // عدد المحاولات لكل سحب
-const RETRY_DELAY = 10000; // 10 ثواني بين المحاولات
-const BATCH_DELAY = 5000; // 5 ثواني بين كل سحب
-const MAX_BALANCE_BUFFER = 0.1; // ترك 0.1 TON كهامش أمان
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 10000;
+const BATCH_DELAY = 5000;
+const MAX_BALANCE_BUFFER = 0.1;
 
 // ==========================
 // 🔹 دالة تقريب المبلغ
@@ -82,7 +82,6 @@ function roundAmount(amount) {
       return 0;
     }
     
-    // تقريب لـ 3 منازل عشرية عشان الدقة
     const rounded = Math.floor(numAmount * 1000) / 1000;
     
     if (rounded < 0.001) {
@@ -294,7 +293,6 @@ async function sendTONWithRetry(toAddress, amount, retryCount = 0) {
       throw new Error(`Invalid amount: ${roundedAmount}`);
     }
     
-    // التحقق من الرصيد
     const balanceCheck = await checkSufficientBalance(roundedAmount);
     
     if (!balanceCheck.sufficient) {
@@ -309,7 +307,6 @@ async function sendTONWithRetry(toAddress, amount, retryCount = 0) {
     
     const nanoAmount = toNano(roundedAmount.toFixed(3));
     
-    // إضافة تأخير قبل الإرسال
     await new Promise(resolve => setTimeout(resolve, 2000));
     
     await contract.sendTransfer({
@@ -320,27 +317,42 @@ async function sendTONWithRetry(toAddress, amount, retryCount = 0) {
           to: toAddress,
           value: nanoAmount,
           bounce: true,
-          body: "@Crystal_Ranch_bot"
+          body: "@PandaBamboBot"
         }),
       ],
     });
 
     console.log(`✅ Transaction sent successfully`);
     
-    // انتظار تأكيد المعاملة
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    // انتظار تأكيد المعاملة وجلب الـ tx hash
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    // جلب آخر معاملة لاستخراج الـ hash
+    let txHash = null;
+    try {
+      const txRes = await fetch(
+        `https://toncenter.com/api/v2/getTransactions?address=${walletAddress}&limit=5`,
+        { headers: { "X-API-Key": process.env.TON_API_KEY } }
+      );
+      const txData = await txRes.json();
+      if (txData.result && txData.result.length > 0) {
+        txHash = txData.result[0].transaction_id.hash;
+      }
+    } catch (e) {
+      console.log(`⚠️ Could not fetch tx hash: ${e.message}`);
+    }
     
     return {
       status: "sent",
       fromAddress: contract.address.toString(),
       toAddress: toAddress,
-      amount: roundedAmount
+      amount: roundedAmount,
+      txHash: txHash
     };
     
   } catch (error) {
     console.log(`❌ Attempt ${retryCount + 1} failed: ${error.message}`);
     
-    // إذا كان خطأ 500 أو أي خطأ شبكة ونحن في محاولة أقل من الحد الأقصى
     if ((error.message.includes('500') || error.message.includes('timeout') || error.message.includes('network')) && retryCount < MAX_RETRIES - 1) {
       const delay = RETRY_DELAY * (retryCount + 1);
       console.log(`⏱️ Retrying in ${delay/1000} seconds... (${retryCount + 2}/${MAX_RETRIES})`);
@@ -353,35 +365,56 @@ async function sendTONWithRetry(toAddress, amount, retryCount = 0) {
 }
 
 // ==========================
-// 🔹 إرسال إشعار للمستخدم (محسّن)
+// 🔹 إرسال إشعار للمستخدم
 // ==========================
 
-async function sendUserNotification(chatId, amount, toAddress) {
+async function sendUserNotification(chatId, amountTon, amountCoins, txHash) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken || !chatId) {
     console.log(`❌ Cannot send notification: missing botToken or chatId`);
     return false;
   }
 
-  const walletLink = `https://tonviewer.com/${toAddress}`;
-  
-  const userMessage = `✅ Withdrawal Successful! 🎉
+  const txLink = txHash
+    ? `https://tonscan.org/tx/${encodeURIComponent(txHash)}`
+    : null;
 
-💰 Amount: ${amount.toFixed(3)} TON
-🔗 ${walletLink}
+  const shortHash = txHash ? txHash.substring(0, 16) + "..." : "N/A";
 
-Your funds have been delivered.`;
+  const userMessage = `🐼 <b>Panda Treasury Released!</b>
+
+Withdrawal Successful ✅
+
+━━━━━━━━━━━━━━━━
+💰 <b>Amount:</b> ${amountTon.toFixed(6)} TON
+🪙 <b>Bamboo Used:</b> ${amountCoins.toLocaleString()}
+🔑 <b>Transaction Hash:</b> <code>${shortHash}</code>
+━━━━━━━━━━━━━━━━
+
+The panda warriors have delivered your reward from the Bamboo Empire treasury. Your strength in the forest grows with every victory.
+
+Thank you for being part of Panda Bamboo Factory. 🎋`;
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+
+  const inlineKeyboard = [];
+  if (txLink) {
+    inlineKeyboard.push({ text: "🔍 View TX", url: txLink });
+  }
+  inlineKeyboard.push({ text: "🐼 Open App", url: "https://t.me/PandaBamboBot?startapp=" });
+
   const payload = {
     chat_id: chatId,
     text: userMessage,
     parse_mode: 'HTML',
-    disable_web_page_preview: false
+    disable_web_page_preview: true,
+    reply_markup: {
+      inline_keyboard: [inlineKeyboard]
+    }
   };
 
   try {
-    console.log(`📤 Sending notification to Telegram user ${chatId}...`);
+    console.log(`📤 Sending notification to user ${chatId}...`);
     
     const response = await fetch(url, {
       method: 'POST',
@@ -405,31 +438,40 @@ Your funds have been delivered.`;
 }
 
 // ==========================
-// 🔹 إرسال إشعار للقناة - في الموضوع الصحيح
+// 🔹 إرسال إشعار قناة المدفوعات
 // ==========================
 
-async function sendChannelNotification(amount, toAddress, userId) {
+async function sendChannelNotification(amountTon, txHash) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) return;
-  
-  const chatId = "@Crystal_Ranch_chat";
-  const topicId = 5;
-  
-  const walletLink = `https://tonviewer.com/${toAddress}`;
-  
-  const channelMessage = `🎉 New Withdrawal! 🎉
 
-🆔 User: \`${userId}\`
-💰 Amount: ${amount.toFixed(3)} TON
-🔗 <a href="${walletLink}">View Transaction</a>`;
+  const txLink = txHash
+    ? `https://tonscan.org/tx/${encodeURIComponent(txHash)}`
+    : null;
+
+  const shortHash = txHash ? txHash.substring(0, 5) + "…" + txHash.substring(txHash.length - 5) : "N/A";
+
+  const channelMessage = `🐼 <b>Bamboo Withdrawal Successful!</b>
+
+💰 Amount: ${amountTon.toFixed(7)} TON
+🔑 TxID: <code>${shortHash}</code>`;
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+
+  const inlineKeyboard = [];
+  if (txLink) {
+    inlineKeyboard.push({ text: "🔍 View TX", url: txLink });
+  }
+  inlineKeyboard.push({ text: "🐼 Open App", url: "https://t.me/PandaBamboBot?startapp=" });
+
   const payload = {
-    chat_id: chatId,
+    chat_id: "@PandaBambooPayouts",
     text: channelMessage,
     parse_mode: 'HTML',
     disable_web_page_preview: true,
-    message_thread_id: topicId
+    reply_markup: {
+      inline_keyboard: [inlineKeyboard]
+    }
   };
 
   try {
@@ -441,8 +483,8 @@ async function sendChannelNotification(amount, toAddress, userId) {
     
     const data = await response.json();
     
-    if (data.ok && data.result) {
-      console.log(`✅ Channel notification sent to topic #${topicId}`);
+    if (data.ok) {
+      console.log(`✅ Channel notification sent to @PandaBambooPayouts`);
     } else {
       console.log(`❌ Channel notification failed: ${data.description}`);
     }
@@ -452,7 +494,7 @@ async function sendChannelNotification(amount, toAddress, userId) {
 }
 
 // ==========================
-// 🔹 معالجة سحب واحد مع إعادة المحاولة (نسخة محسّنة)
+// 🔹 معالجة سحب واحد
 // ==========================
 
 async function processWithdrawal(withdrawId, data) {
@@ -461,10 +503,10 @@ async function processWithdrawal(withdrawId, data) {
   console.log("=".repeat(40));
 
   try {
-    // التحقق من البيانات
-    if (!data || !data.address || !data.netAmount) {
+    // التحقق من البيانات — الحقول الجديدة: address, ton, amt, userId
+    if (!data || !data.address || !data.ton) {
       console.log(`❌ Invalid withdrawal data`);
-      await db.ref(`withdrawals/${withdrawId}`).update({
+      await db.ref(`withdrawQueue/${withdrawId}`).update({
         status: "failed",
         error: "Invalid withdrawal data",
         updatedAt: Date.now()
@@ -472,12 +514,12 @@ async function processWithdrawal(withdrawId, data) {
       return true;
     }
     
-    const roundedAmount = roundAmount(data.netAmount);
+    const roundedAmount = roundAmount(data.ton);
     
     // التحقق من الحد الأقصى (10 TON)
     if (roundedAmount > 10) {
       console.log(`⏭️ Amount exceeds limit: ${roundedAmount} TON`);
-      await db.ref(`withdrawals/${withdrawId}`).update({
+      await db.ref(`withdrawQueue/${withdrawId}`).update({
         status: "failed",
         error: "Amount exceeds maximum limit of 10 TON",
         updatedAt: Date.now()
@@ -488,7 +530,7 @@ async function processWithdrawal(withdrawId, data) {
     // التحقق من العنوان
     if (!data.address.startsWith("EQ") && !data.address.startsWith("UQ")) {
       console.log(`⏭️ Invalid address: ${data.address}`);
-      await db.ref(`withdrawals/${withdrawId}`).update({
+      await db.ref(`withdrawQueue/${withdrawId}`).update({
         status: "failed",
         error: "Invalid TON address",
         updatedAt: Date.now()
@@ -496,113 +538,76 @@ async function processWithdrawal(withdrawId, data) {
       return true;
     }
 
-    // ✅ قراءة User ID مباشرة من البيانات (وهي موجودة فعلاً)
-    let userId = data.userId || null;
-    
-    // ✅ التأكد من وجود userId قبل المتابعة
+    const userId = data.userId || null;
+    const amountCoins = data.amt || 0; // عدد الكوينز المسحوبة
+
     if (userId) {
-      console.log(`✅✅✅ User ID found in database: ${userId}`);
+      console.log(`✅ User ID found: ${userId}`);
     } else {
-      console.log(`❌❌❌ CRITICAL ERROR: userId field is missing in database for ${withdrawId}`);
-      console.log(`📦 Available fields in data:`, Object.keys(data).join(', '));
-      
-      // تحديث الحالة ولكن لا نوقف العملية لأن السحب نفسه ممكن يتم
-      await db.ref(`withdrawals/${withdrawId}`).update({
-        warning: "Missing userId field",
-        updatedAt: Date.now()
-      });
+      console.log(`❌ CRITICAL: userId missing for ${withdrawId}`);
     }
 
     // تحديث إلى processing
-    await db.ref(`withdrawals/${withdrawId}`).update({
+    await db.ref(`withdrawQueue/${withdrawId}`).update({
       status: "processing",
       updatedAt: Date.now(),
       attempts: (data.attempts || 0) + 1
     });
 
-    // إرسال TON مع إعادة المحاولة
     console.log(`💰 Preparing to send ${roundedAmount} TON to ${data.address.substring(0,8)}...`);
     const result = await sendTONWithRetry(data.address, roundedAmount);
 
     // تحديث إلى paid
-    await db.ref(`withdrawals/${withdrawId}`).update({
+    await db.ref(`withdrawQueue/${withdrawId}`).update({
       status: "paid",
       updatedAt: Date.now(),
       completedAt: Date.now(),
-      toAddress: data.address,
-      originalAmount: data.netAmount,
+      txHash: result.txHash || null,
       sentAmount: result.amount,
-      balanceBefore: data.balanceBefore || null
     });
     
     console.log(`✅ Transaction completed for: ${withdrawId}`);
 
-    // ✅ إرسال الإشعارات للمستخدم إذا كان userId موجوداً
+    // إرسال الإشعارات
     if (userId) {
-      console.log(`📨 Attempting to send notification to user ${userId}...`);
-      
-      const notificationSent = await sendUserNotification(userId, result.amount, data.address);
-      
-      if (notificationSent) {
-        console.log(`✅ User notification sent successfully to ${userId}`);
-      } else {
-        console.log(`❌ Failed to send notification to user ${userId} - check bot token or if user blocked the bot`);
-      }
-      
-      // إرسال إشعار القناة (لا يعتمد على نجاح إشعار المستخدم)
-      await sendChannelNotification(result.amount, data.address, userId);
-      console.log(`✅ Channel notification sent for user ${userId}`);
+      await sendUserNotification(userId, result.amount, amountCoins, result.txHash);
     } else {
-      console.log(`⚠️ Cannot send notifications: No userId available for ${withdrawId}`);
+      console.log(`⚠️ Cannot send user notification: No userId for ${withdrawId}`);
       
-      // إرسال إشعار للمشرف بوجود سحب بدون userId
       const botToken = process.env.TELEGRAM_BOT_TOKEN;
       if (botToken) {
-        const adminMessage = `⚠️ Withdrawal completed but no userId found\n\n` +
-          `ID: ${withdrawId}\n` +
-          `Amount: ${result.amount} TON\n` +
-          `Address: ${data.address}`;
-        
-        const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
-        const payload = {
-          chat_id: ADMIN_CHAT_ID,
-          text: adminMessage,
-        };
-        
-        try {
-          await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
-          console.log(`✅ Admin notification sent about missing userId`);
-        } catch (e) {
-          console.log(`❌ Failed to send admin notification: ${e.message}`);
-        }
+        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: ADMIN_CHAT_ID,
+            text: `⚠️ Withdrawal done but no userId\nID: ${withdrawId}\nAmount: ${result.amount} TON\nAddress: ${data.address}`
+          }),
+        });
       }
     }
+
+    // إشعار قناة المدفوعات دايمًا
+    await sendChannelNotification(result.amount, result.txHash);
     
     return true;
 
   } catch (error) {
     console.log(`❌ Failed to process withdrawal: ${error.message}`);
     
-    // زيادة عداد المحاولات
     const attempts = (data.attempts || 0) + 1;
     
-    // إذا وصل لأقصى عدد محاولات، نضعها failed
     if (attempts >= MAX_RETRIES) {
       console.log(`⏭️ Max retries reached for ${withdrawId}`);
-      await db.ref(`withdrawals/${withdrawId}`).update({
+      await db.ref(`withdrawQueue/${withdrawId}`).update({
         status: "failed",
         updatedAt: Date.now(),
         lastError: error.message,
         attempts: attempts
       });
     } else {
-      // نتركها pending للمحاولة مرة أخرى
       console.log(`⏭️ Will retry later (attempt ${attempts}/${MAX_RETRIES})`);
-      await db.ref(`withdrawals/${withdrawId}`).update({
+      await db.ref(`withdrawQueue/${withdrawId}`).update({
         status: "pending",
         updatedAt: Date.now(),
         lastError: error.message,
@@ -627,8 +632,8 @@ async function processPendingWithdrawals() {
   try {
     isProcessing = true;
     
-    // جلب السحوبات المعلقة
-    const snapshot = await db.ref("withdrawals")
+    // قراءة من withdrawQueue بدل withdrawals
+    const snapshot = await db.ref("withdrawQueue")
       .orderByChild("status")
       .equalTo("pending")
       .once("value");
@@ -641,13 +646,12 @@ async function processPendingWithdrawals() {
       return;
     }
     
-    // ترتيب السحوبات (الأقدم أولاً) وتصفية المكرر
     const withdrawalList = Object.entries(withdrawals)
       .filter(([id]) => !processingQueue.has(id))
       .map(([id, data]) => ({
         id,
         data,
-        timestamp: data.createdAt || data.timestamp || 0
+        timestamp: data.ts || data.timestamp || 0
       }))
       .sort((a, b) => a.timestamp - b.timestamp);
     
@@ -659,12 +663,12 @@ async function processPendingWithdrawals() {
     
     console.log(`📋 Found ${withdrawalList.length} pending withdrawals`);
     
-    // التحقق من الرصيد الكلي المطلوب
     const totalRequired = withdrawalList.reduce((sum, w) => {
-      return sum + roundAmount(w.data.netAmount);
+      return sum + roundAmount(w.data.ton);
     }, 0);
     
     const currentBalance = await getWalletBalance();
+    
     console.log(`💰 Total required: ${totalRequired.toFixed(3)} TON`);
     console.log(`💰 Current balance: ${currentBalance.toFixed(3)} TON`);
     
@@ -673,7 +677,6 @@ async function processPendingWithdrawals() {
       await sendBalanceWarning(currentBalance, totalRequired);
     }
     
-    // معالجة كل سحب
     for (let i = 0; i < withdrawalList.length; i++) {
       const { id, data } = withdrawalList[i];
       
@@ -684,16 +687,12 @@ async function processPendingWithdrawals() {
       try {
         console.log(`\n🔄 Processing (${i + 1}/${withdrawalList.length}): ${id}`);
         
-        // التحقق من الرصيد قبل كل سحب
-        const requiredAmount = roundAmount(data.netAmount);
+        const requiredAmount = roundAmount(data.ton);
         const balanceCheck = await checkSufficientBalance(requiredAmount);
         
         if (!balanceCheck.sufficient) {
-          console.log(`⏭️ Insufficient balance for this withdrawal (need ${requiredAmount.toFixed(3)} TON, have ${balanceCheck.balance.toFixed(3)} TON)`);
+          console.log(`⏭️ Insufficient balance - stopping batch`);
           await sendBalanceWarning(balanceCheck.balance, requiredAmount);
-          
-          // نخرج من الحلقة عشان الرصيد مش كفاية
-          console.log(`⏭️ Stopping batch - insufficient balance`);
           break;
         }
         
@@ -705,7 +704,6 @@ async function processPendingWithdrawals() {
           console.log(`⚠️ Will retry later`);
         }
         
-        // ننتظر بين كل عملية
         if (i < withdrawalList.length - 1) {
           console.log(`⏱️ Waiting ${BATCH_DELAY/1000} seconds before next...`);
           await new Promise(resolve => setTimeout(resolve, BATCH_DELAY));
@@ -740,51 +738,57 @@ function startWelcomeBot() {
   try {
     const welcomeBot = new TelegramBot(botToken, { polling: true });
     
-    const WELCOME_TEXT = `🚜 Welcome to Crystal Ranch — a scarcity-based economy where early entry matters 👇
-
-🐄 Cow Machine is available to the first 1000 users only
-🐔 Chicken Machine unlocks after cows sell out
-💎 Diamond Engine costs 5 TON
-
-Early entry is the key to market control 🚀`;
-
     // أمر /start
     welcomeBot.onText(/\/start/, async (msg) => {
       const chatId = msg.chat.id;
+      const firstName = msg.from.first_name || "Warrior";
       
       console.log(`👋 New user started: ${chatId}`);
       
+      const welcomeText = `Hey ${firstName}! 👋 You've just joined the coolest virtual factory on Telegram.
+
+🎁 <b>Your starter pack is ready:</b>
+• 200 Coins — free to withdraw right away
+• 100 Bamboo/day — free mining starts immediately
+
+⚙️ <b>How it works:</b>
+1️⃣ Mine — Bamboo accumulates in your tank automatically
+2️⃣ Exchange — Convert Bamboo → Coins in Finance
+3️⃣ Withdraw — Send Coins to your TON wallet 💎
+
+🚀 <b>Boost your earnings:</b>
+— Buy machines from the Market to increase daily output
+— Complete Tasks for bonus Bamboo & Coins
+— Invite friends and earn 20% commission on their purchases`;
+
       const keyboard = {
         inline_keyboard: [
-          [{ text: "🚀 Open App", url: "https://t.me/Crystal_Ranch_bot?startapp=" }],
+          [{ text: "🐼 Open App", url: "https://t.me/PandaBamboBot?startapp=" }],
           [
-            { text: "💬 Chat", url: "https://t.me/Crystal_Ranch_chat" },
-            { text: "📢 Channel", url: "https://t.me/earnmoney139482" }
+            { text: "📢 News", url: "https://t.me/PandaMiningNews" },
+            { text: "💸 Payouts", url: "https://t.me/PandaBambooPayouts" }
           ]
         ]
       };
       
       try {
-        await welcomeBot.sendMessage(chatId, WELCOME_TEXT, {
+        await welcomeBot.sendMessage(chatId, welcomeText, {
+          parse_mode: 'HTML',
           reply_markup: keyboard,
           disable_web_page_preview: true
         });
         console.log(`✅ Welcome sent to ${chatId}`);
-      } catch (error) {}
+      } catch (error) {
+        console.log(`❌ Error sending welcome: ${error.message}`);
+      }
     });
     
     // أمر /help
     welcomeBot.onText(/\/help/, async (msg) => {
       const chatId = msg.chat.id;
-      await welcomeBot.sendMessage(chatId, "/start - Welcome\n/help - Help\n/about - About");
+      await welcomeBot.sendMessage(chatId, "/start - Welcome\n/help - Help\n/balance - Wallet Balance (Admin)");
     });
-    
-    // أمر /about
-    welcomeBot.onText(/\/about/, async (msg) => {
-      const chatId = msg.chat.id;
-      await welcomeBot.sendMessage(chatId, "💎 Crystal Ranch\nApp: @Crystal_Ranch_bot\nChat: @Crystal_Ranch_chat");
-    });
-    
+
     // أمر /balance للمشرف
     welcomeBot.onText(/\/balance/, async (msg) => {
       const chatId = msg.chat.id;
@@ -796,17 +800,16 @@ Early entry is the key to market control 🚀`;
       
       try {
         const balance = await getWalletBalance();
-        const pendingSnapshot = await db.ref("withdrawals")
+        const pendingSnapshot = await db.ref("withdrawQueue")
           .orderByChild("status")
           .equalTo("pending")
           .once("value");
         
         const pendingCount = pendingSnapshot.numChildren();
         
-        // حساب إجمالي المبالغ المعلقة
         let totalPending = 0;
         pendingSnapshot.forEach(child => {
-          totalPending += roundAmount(child.val().netAmount || 0);
+          totalPending += roundAmount(child.val().ton || 0);
         });
         
         const walletLink = `https://tonviewer.com/${walletAddress}`;
@@ -838,7 +841,7 @@ Early entry is the key to market control 🚀`;
       await welcomeBot.sendMessage(chatId, "✅ Processing completed");
     });
     
-    // أمر /checkbalance للتأكد يدوياً
+    // أمر /checkbalance
     welcomeBot.onText(/\/checkbalance/, async (msg) => {
       const chatId = msg.chat.id;
       
@@ -854,7 +857,7 @@ Early entry is the key to market control 🚀`;
     
     welcomeBot.on('polling_error', () => {});
     
-    console.log("✅ Welcome bot is running with all commands");
+    console.log("✅ Welcome bot is running");
   } catch (error) {
     console.log("❌ Failed to start welcome bot:", error.message);
   }
@@ -865,21 +868,18 @@ Early entry is the key to market control 🚀`;
 // ==========================
 
 console.log("\n" + "=".repeat(50));
-console.log("🚀 CRYSTAL RANCH WITHDRAWAL BOT");
+console.log("🐼 PANDA BAMBOO WITHDRAWAL BOT");
 console.log("=".repeat(50));
 
-// التحقق من المتغيرات
 console.log("\n📋 Environment Check:");
 console.log(`FIREBASE: ${process.env.FIREBASE_SERVICE_ACCOUNT ? '✅' : '❌'}`);
 console.log(`TON_API_KEY: ${process.env.TON_API_KEY ? '✅' : '❌'}`);
 console.log(`TON_MNEMONIC: ${process.env.TON_MNEMONIC ? '✅' : '❌'}`);
 console.log(`TELEGRAM_BOT_TOKEN: ${process.env.TELEGRAM_BOT_TOKEN ? '✅' : '❌'}`);
 
-// تشغيل بوت الترحيب
 console.log("\n🤖 Starting Welcome Bot...");
 startWelcomeBot();
 
-// تحميل المحفظة
 console.log("\n💰 Loading TON Wallet...");
 getWallet().then(async () => {
   const balance = await getWalletBalance();
@@ -890,17 +890,12 @@ getWallet().then(async () => {
     await sendBalanceWarning(balance);
   }
   
-  // معالجة أولية
   console.log("\n🔄 Processing initial pending withdrawals...");
   await processPendingWithdrawals();
   
 }).catch(err => {
   console.error("❌ Wallet error:", err.message);
 });
-
-// ==========================
-// 🔹 تشغيل المعالجة الدورية
-// ==========================
 
 // معالجة كل 60 ثانية
 setInterval(async () => {
@@ -915,17 +910,16 @@ setInterval(async () => {
 }, 15 * 60 * 1000);
 
 // ==========================
-// 🔹 الاستماع للسحوبات الجديدة
+// 🔹 الاستماع للسحوبات الجديدة من withdrawQueue
 // ==========================
 
-db.ref("withdrawals").on("child_added", async (snapshot) => {
+db.ref("withdrawQueue").on("child_added", async (snapshot) => {
   const withdrawId = snapshot.key;
   const data = snapshot.val();
   
   if (data && data.status === "pending" && !processingQueue.has(withdrawId)) {
     console.log(`📢 New pending withdrawal detected: ${withdrawId}`);
     
-    // نشغل المعالجة بعد تأخير بسيط
     setTimeout(() => {
       processPendingWithdrawals();
     }, 2000);
@@ -938,7 +932,7 @@ db.ref(".info/connected").on("value", (snap) => {
   }
 });
 
-console.log("\n💸 TON Auto Withdraw Running (Max 10 TON)");
-console.log("📬 Messages will be sent to topic #5 (Withdrawals & deposit 💰)");
-console.log("👤 Admin notifications will be sent to: 6970148965");
+console.log("\n💸 TON Auto Withdraw Running");
+console.log("📬 Notifications → @PandaBambooPayouts");
+console.log("👤 Admin notifications → " + ADMIN_CHAT_ID);
 console.log("=".repeat(50) + "\n");
