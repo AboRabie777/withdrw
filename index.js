@@ -204,14 +204,24 @@ async function sendUserNotification(chatId, amountTon, amountCoins, txHash) {
 // ==========================
 // 🔹 إشعار قناة المدفوعات
 // ==========================
-async function sendChannelNotification(amountTon, txHash) {
+async function sendChannelNotification(amountTon, txHash, userId) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) return;
-  const txLink   = txHash ? `https://tonscan.org/tx/${encodeURIComponent(txHash)}` : null;
-  const caption  =
+  const txLink = txHash ? `https://tonscan.org/tx/${encodeURIComponent(txHash)}` : null;
+
+  // إخفاء جزء من User ID: 7236875323 → 723******23
+  let maskedId = userId || 'Unknown';
+  if (userId && userId.length > 5) {
+    const uid = String(userId);
+    maskedId = uid.substring(0, 3) + '*'.repeat(uid.length - 5) + uid.substring(uid.length - 2);
+  }
+
+  const caption =
     `🐼 <b>Bamboo Withdrawal Successful!</b>\n\n` +
+    `👤 User: <b>${maskedId}</b>\n` +
     `💰 Amount: <b>${amountTon.toFixed(7)} TON</b>\n` +
-    (txHash ? `🔑 TxID: <code>${txHash}</code>` : ``);
+    (txLink ? `🔗 TxID: <a href="${txLink}">${txHash.substring(0, 8)}...${txHash.substring(txHash.length - 6)}</a>` : ``);
+
   const keys = [];
   if (txLink) keys.push({ text: "🔍 View TX", url: txLink });
   keys.push({ text: "🐼 Open App", url: "https://t.me/PandaBamboBot?startapp=" });
@@ -264,21 +274,23 @@ async function processWithdrawal(withdrawId, data) {
     const wdId          = data.wdId   || withdrawId;
     const amountCoins   = data.amt    || 0;
 
-    // تحقق من الحدود
-    if (roundedAmount > MAX_WITHDRAWAL_AMOUNT) {
-      await db.ref(`withdrawQueue/${withdrawId}`).update({ status: "failed", error: `Exceeds max ${MAX_WITHDRAWAL_AMOUNT} TON`, updatedAt: Date.now() });
-      if (userId && wdId) await db.ref(`users/${userId}/wdHistory/${wdId}`).update({ status: "failed", updatedAt: Date.now() });
-      return true;
-    }
-    if (roundedAmount < MIN_WITHDRAWAL_AMOUNT) {
-      await db.ref(`withdrawQueue/${withdrawId}`).update({ status: "failed", error: `Below min ${MIN_WITHDRAWAL_AMOUNT} TON`, updatedAt: Date.now() });
-      if (userId && wdId) await db.ref(`users/${userId}/wdHistory/${wdId}`).update({ status: "failed", updatedAt: Date.now() });
-      return true;
-    }
+    // تحقق من العنوان — فشل نهائي لأنه لن يتصلح
     if (!data.address.startsWith("EQ") && !data.address.startsWith("UQ")) {
       await db.ref(`withdrawQueue/${withdrawId}`).update({ status: "failed", error: "Invalid TON address", updatedAt: Date.now() });
       if (userId && wdId) await db.ref(`users/${userId}/wdHistory/${wdId}`).update({ status: "failed", updatedAt: Date.now() });
       return true;
+    }
+
+    // تحقق من الحدود — نتركه pending لأن الأدمن قد يغير الحد لاحقاً
+    if (roundedAmount > MAX_WITHDRAWAL_AMOUNT) {
+      console.log(`⏸ ${withdrawId} exceeds max (${roundedAmount} > ${MAX_WITHDRAWAL_AMOUNT} TON) — keeping pending`);
+      await db.ref(`withdrawQueue/${withdrawId}`).update({ status: "pending", error: `Exceeds max ${MAX_WITHDRAWAL_AMOUNT} TON — waiting`, updatedAt: Date.now() });
+      return false;
+    }
+    if (roundedAmount < MIN_WITHDRAWAL_AMOUNT) {
+      console.log(`⏸ ${withdrawId} below min (${roundedAmount} < ${MIN_WITHDRAWAL_AMOUNT} TON) — keeping pending`);
+      await db.ref(`withdrawQueue/${withdrawId}`).update({ status: "pending", error: `Below min ${MIN_WITHDRAWAL_AMOUNT} TON — waiting`, updatedAt: Date.now() });
+      return false;
     }
 
     // processing
@@ -309,18 +321,16 @@ async function processWithdrawal(withdrawId, data) {
     }
 
     // إشعار القناة
-    await sendChannelNotification(result.amount, result.txHash);
+    await sendChannelNotification(result.amount, result.txHash, userId);
     return true;
 
   } catch (error) {
     console.log(`❌ processWithdrawal: ${error.message}`);
     const attempts = (data.attempts || 0) + 1;
-    const status   = attempts >= MAX_RETRIES ? "failed" : "pending";
-    await db.ref(`withdrawQueue/${withdrawId}`).update({ status, updatedAt: Date.now(), lastError: error.message, attempts });
-    // لو failed نحدث wdHistory كمان
-    if (status === "failed" && data.userId && data.wdId) {
-      await db.ref(`users/${data.userId}/wdHistory/${data.wdId}`).update({ status: "failed", lastError: error.message, updatedAt: Date.now() });
-    }
+    // دايماً pending — مش failed — عشان يتعالج مرة تانية
+    await db.ref(`withdrawQueue/${withdrawId}`).update({
+      status: "pending", updatedAt: Date.now(), lastError: error.message, attempts
+    });
     return false;
   }
 }
