@@ -293,8 +293,17 @@ async function processWithdrawal(withdrawId, data) {
       return false;
     }
 
-    // processing
-    await db.ref(`withdrawQueue/${withdrawId}`).update({ status: "processing", updatedAt: Date.now(), attempts: (data.attempts || 0) + 1 });
+    // 🔒 قفل ذري — لو سحبين وصلوا في نفس اللحظة، واحد بس يفوز بالقفل
+    let locked = false;
+    await db.ref(`withdrawQueue/${withdrawId}`).transaction((current) => {
+      if (!current || current.status !== "pending") return; // abort — شخص تاني أخذه
+      locked = true;
+      return { ...current, status: "processing", updatedAt: Date.now(), attempts: (current.attempts || 0) + 1 };
+    });
+    if (!locked) {
+      console.log(`⏭️ ${withdrawId} already taken by another process — skipping`);
+      return false;
+    }
 
     // إرسال TON
     const result = await sendTONWithRetry(data.address, roundedAmount);
@@ -613,9 +622,33 @@ function startWelcomeBot() {
   console.log("✅ Bot running with all admin commands");
 }
 
-// ==========================
-// 🔹 التشغيل
-// ==========================
+setInterval(async () => {
+  if (systemPaused) return;
+  try {
+    const snap = await db.ref("withdrawQueue").orderByChild("status").equalTo("processing").once("value");
+    const items = snap.val();
+    if (!items) return;
+    const stuckThreshold = Date.now() - 5 * 60 * 1000; // 5 دقايق
+    let recovered = 0;
+    for (const [id, data] of Object.entries(items)) {
+      if ((data.updatedAt || 0) < stuckThreshold) {
+        await db.ref(`withdrawQueue/${id}`).update({
+          status: "pending",
+          updatedAt: Date.now(),
+          lastError: "Recovered from stuck processing state",
+        });
+        console.log(`♻️ Recovered stuck withdrawal: ${id}`);
+        recovered++;
+      }
+    }
+    if (recovered > 0) {
+      console.log(`♻️ Recovered ${recovered} stuck withdrawal(s) — triggering re-process`);
+      setTimeout(() => processPendingWithdrawals(), 2000);
+    }
+  } catch (e) { console.log(`❌ stuckRecovery: ${e.message}`); }
+}, 2 * 60 * 1000); // كل دقيقتين
+
+
 console.log("\n" + "=".repeat(50));
 console.log("🐼 PANDA BAMBOO WITHDRAWAL BOT");
 console.log("=".repeat(50));
