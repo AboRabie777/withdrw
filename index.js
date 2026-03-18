@@ -354,24 +354,32 @@ async function validateWithdrawal(withdrawId, data) {
 
   // تحقق من العنوان — فحص شامل
   const addr = String(data.address || '').trim();
-  // العنوان الصحيح: يبدأ بـ EQ أو UQ، طوله بين 48-50 حرف، بدون مسافات أو تكرار
-  const validPrefix = addr.startsWith("EQ") || addr.startsWith("UQ");
-  const validLength = addr.length >= 48 && addr.length <= 52;
-  // اكتشاف التكرار: لو العنوان بيحتوي على EQ أو UQ في المنتصف = عنوانين ملصقين
-  const duplicated  = (addr.indexOf("EQ", 2) !== -1 || addr.indexOf("UQ", 2) !== -1);
-  const hasSpaces   = /\s/.test(addr);
 
-  if (!validPrefix || !validLength || duplicated || hasSpaces) {
-    const reason = duplicated  ? "Duplicated address — two addresses merged" :
-                   !validPrefix ? "Invalid TON address prefix" :
-                   !validLength ? `Invalid address length (${addr.length})` :
-                                  "Address contains spaces";
-    console.log(`❌ Invalid address for ${withdrawId}: ${reason} | addr: ${addr.substring(0, 20)}...`);
+  // العنوان الصحيح: يبدأ بـ EQ أو UQ، طوله 48 حرف بالضبط، أحرف base64url فقط
+  const validPrefix  = addr.startsWith("EQ") || addr.startsWith("UQ");
+  const validLength  = addr.length === 48;
+  // base64url: A-Z a-z 0-9 + - _ (لا يوجد @ # $ % إلخ)
+  const validChars   = /^[A-Za-z0-9+/\-_=]+$/.test(addr);
+  // اكتشاف التكرار: وجود EQ أو UQ بعد الحرف الأول
+  const duplicated   = addr.indexOf("EQ", 2) !== -1 || addr.indexOf("UQ", 2) !== -1;
+  const hasSpaces    = addr.includes(' ');
+
+  let addrError = null;
+  if (!validPrefix)  addrError = `Invalid prefix (expected EQ/UQ, got ${addr.substring(0,2)})`;
+  else if (duplicated) addrError = `Duplicated address — two addresses merged`;
+  else if (!validLength) addrError = `Invalid length: ${addr.length} (expected 48)`;
+  else if (!validChars)  addrError = `Invalid characters in address`;
+  else if (hasSpaces)    addrError = `Address contains spaces`;
+
+  if (addrError) {
+    console.log(`❌ Bad address [${withdrawId}]: ${addrError} | ${addr.substring(0, 30)}...`);
     await db.ref(`withdrawQueue/${withdrawId}`).update({
-      status: "cancelled", error: reason, updatedAt: Date.now()
+      status: "cancelled", error: addrError, updatedAt: Date.now()
     });
-    if (userId && wdId) await db.ref(`users/${userId}/wdHistory/${wdId}`).update({ status: "cancelled", updatedAt: Date.now() });
-    // إشعار الأدمن بالعنوان الفاسد
+    if (userId && wdId) {
+      await db.ref(`users/${userId}/wdHistory/${wdId}`)
+        .update({ status: "cancelled", updatedAt: Date.now() }).catch(() => {});
+    }
     if (botInstance) {
       await botInstance.sendMessage(ADMIN_CHAT_ID,
         `⚠️ <b>عنوان محفظة فاسد — تم إلغاء الطلب</b>
@@ -381,7 +389,7 @@ async function validateWithdrawal(withdrawId, data) {
 ` +
         `👤 User: <code>${userId || '?'}</code>
 ` +
-        `❌ السبب: ${reason}
+        `❌ السبب: ${addrError}
 ` +
         `📬 العنوان:
 <code>${addr.substring(0, 80)}</code>`,
@@ -479,22 +487,80 @@ async function sendBatchTransfer(items, attempt = 0) {
     const { contract, key } = await getWallet();
     const seqno = await contract.getSeqno();
 
-    // بناء قائمة الرسائل
-    const messages = items.map(item =>
-      internal({
-        to:     item.data.address,
-        value:  toNano(item.roundedAmount.toFixed(3)),
-        bounce: false,
-      })
-    );
+    // ─── بناء قائمة الرسائل مع عزل أي عنوان فاسد ───────
+    const validMessages = [];
+    const invalidItems  = [];
+
+    for (const item of items) {
+      try {
+        const msg = internal({
+          to:     item.data.address,
+          value:  toNano(item.roundedAmount.toFixed(3)),
+          bounce: false,
+        });
+        validMessages.push({ item, msg });
+      } catch (addrErr) {
+        // العنوان فاسد — ألغِ هذا الطلب فوراً
+        const reason = addrErr.message || 'Invalid address';
+        console.log(`❌ Bad address — cancelling ${item.id}: ${reason}`);
+        invalidItems.push({ item, reason });
+        await db.ref(`withdrawQueue/${item.id}`).update({
+          status: "cancelled", updatedAt: Date.now(),
+          error: `Bad address: ${reason}`,
+        }).catch(() => {});
+        if (item.userId && item.wdId) {
+          await db.ref(`users/${item.userId}/wdHistory/${item.wdId}`)
+            .update({ status: "cancelled", updatedAt: Date.now() }).catch(() => {});
+        }
+        processingQueue.delete(item.id);
+      }
+    }
+
+    // إشعار الأدمن بالعناوين الفاسدة (دفعة واحدة)
+    if (invalidItems.length > 0 && botInstance) {
+      const lines = invalidItems.map(x =>
+        `• <code>${x.item.id}</code> | 👤 <code>${x.item.userId || '?'}</code>\n` +
+        `  📬 <code>${String(x.item.data.address).substring(0, 60)}</code>\n` +
+        `  ❌ ${x.reason}`
+      ).join('\n\n');
+      await botInstance.sendMessage(ADMIN_CHAT_ID,
+        `⚠️ <b>${invalidItems.length} عنوان فاسد — تم إلغاؤها تلقائياً</b>\n\n${lines}`,
+        { parse_mode: 'HTML' }
+      ).catch(() => {});
+    }
+
+    // لو كل العناوين فاسدة — توقف
+    if (validMessages.length === 0) {
+      console.log(`🚫 Batch cancelled — all addresses invalid`);
+      return { success: false, reason: 'all_invalid' };
+    }
+
+    // أعد بناء items بالعناوين الصحيحة فقط
+    const cleanItems = validMessages.map(x => x.item);
+    const messages   = validMessages.map(x => x.msg);
+    const cleanTotal = cleanItems.reduce((s, i) => s + i.roundedAmount, 0);
+    console.log(`📦 Building batch: ${cleanItems.length}/${items.length} valid (${invalidItems.length} cancelled) | ${cleanTotal.toFixed(4)} TON`);
+
+    // فحص الرصيد مجدداً بعد حذف الفاسدة
+    const recheck = await checkSufficientBalance(cleanTotal);
+    if (!recheck.sufficient) {
+      for (const item of cleanItems) {
+        processingQueue.delete(item.id);
+        await db.ref(`withdrawQueue/${item.id}`).update({
+          status: "pending", updatedAt: Date.now(),
+          lastError: `Insufficient balance: ${recheck.balance.toFixed(3)} TON`,
+        }).catch(() => {});
+      }
+      return { success: false, reason: 'insufficient_balance' };
+    }
 
     // تأخير صغير قبل الإرسال
     await new Promise(r => setTimeout(r, 1000));
 
-    // إرسال كل الرسائل في معاملة واحدة
+    // إرسال كل الرسائل الصحيحة في معاملة واحدة
     await contract.sendTransfer({ secretKey: key.secretKey, seqno, messages });
 
-    console.log(`📤 Batch submitted — seqno: ${seqno} | ${items.length} msgs | attempt: ${attempt + 1}`);
+    console.log(`📤 Batch submitted — seqno: ${seqno} | ${cleanItems.length} msgs | attempt: ${attempt + 1}`);
 
     // انتظار تأكيد الـ seqno (حتى 120 ثانية)
     const confirmation = await confirmBatchTransaction(seqno, 120000);
@@ -502,7 +568,7 @@ async function sendBatchTransfer(items, attempt = 0) {
     if (!confirmation.confirmed) {
       // TIMEOUT — لا نعيد الإرسال لأن الفلوس ممكن تكون راحت
       console.log(`⚠️ Batch TIMEOUT — seqno ${seqno} not advanced. Marking as needs_review.`);
-      for (const item of items) {
+      for (const item of cleanItems) {
         await db.ref(`withdrawQueue/${item.id}`).update({
           status: "needs_review", updatedAt: Date.now(),
           lastError: `Batch timeout — seqno ${seqno} — verify manually`,
@@ -514,9 +580,9 @@ async function sendBatchTransfer(items, attempt = 0) {
       if (botInstance) {
         await botInstance.sendMessage(ADMIN_CHAT_ID,
           `⚠️ <b>Batch Timeout</b>\n\n` +
-          `${items.length} سحوبات تحتاج مراجعة يدوية\n` +
+          `${cleanItems.length} سحوبات تحتاج مراجعة يدوية\n` +
           `Seqno: <code>${seqno}</code>\n\n` +
-          `IDs:\n${items.map(i => `• <code>${i.id}</code>`).join('\n')}`,
+          `IDs:\n${cleanItems.map(i => `• <code>${i.id}</code>`).join('\n')}`,
           { parse_mode: 'HTML' }
         ).catch(() => {});
       }
@@ -537,7 +603,7 @@ async function sendBatchTransfer(items, attempt = 0) {
     console.log(`✅ Batch confirmed | hash: ${batchTxHash ? batchTxHash.substring(0, 14) + '...' : 'N/A'}`);
 
     // تحديث Firebase لكل سحب في الدفعة
-    const updatePromises = items.map(async (item) => {
+    const updatePromises = cleanItems.map(async (item) => {
       try {
         await db.ref(`withdrawQueue/${item.id}`).update({
           status:      "paid",
@@ -545,7 +611,7 @@ async function sendBatchTransfer(items, attempt = 0) {
           completedAt: Date.now(),
           txHash:      batchTxHash || null,
           sentAmount:  item.roundedAmount,
-          batchSize:   items.length,
+          batchSize:   cleanItems.length,
         });
         await updateUserWdHistory(item.userId, item.wdId, batchTxHash, item.roundedAmount);
         processingQueue.delete(item.id);
@@ -557,19 +623,18 @@ async function sendBatchTransfer(items, attempt = 0) {
     await Promise.all(updatePromises);
 
     // إشعارات المستخدمين — كل مستخدم على حدة مع retry
-    for (const item of items) {
+    for (const item of cleanItems) {
       const sent = await sendUserNotification(item.userId, item.roundedAmount, item.amountCoins, batchTxHash);
       if (!sent) {
-        // محاولة ثانية بعد ثانيتين
         await new Promise(r => setTimeout(r, 2000));
         await sendUserNotification(item.userId, item.roundedAmount, item.amountCoins, batchTxHash);
       }
     }
     // إشعار القناة بكل المستخدمين في رسالة واحدة
-    await sendChannelNotification(items, batchTxHash).catch(() => {});
+    await sendChannelNotification(cleanItems, batchTxHash).catch(() => {});
 
-    console.log(`🎉 Batch complete: ${items.length} withdrawals paid`);
-    return { success: true, txHash: batchTxHash, count: items.length };
+    console.log(`🎉 Batch complete: ${cleanItems.length} paid${invalidItems.length > 0 ? ` (${invalidItems.length} cancelled — bad address)` : ''}`);
+    return { success: true, txHash: batchTxHash, count: cleanItems.length };
 
   } catch (error) {
     const msg = error.message;
@@ -584,9 +649,10 @@ async function sendBatchTransfer(items, attempt = 0) {
       return sendBatchTransfer(items, attempt + 1);
     }
 
-    // فشل نهائي — أرجع كل السحوبات لـ pending مع تسجيل الخطأ
-    console.log(`🔴 Batch FINAL FAIL — reverting ${items.length} items to pending`);
-    for (const item of items) {
+    // فشل نهائي — أرجع السحوبات الصحيحة لـ pending (الفاسدة اتلغت بالفعل)
+    const revertList = (typeof cleanItems !== 'undefined') ? cleanItems : items;
+    console.log(`🔴 Batch FINAL FAIL — reverting ${revertList.length} items to pending`);
+    for (const item of revertList) {
       await db.ref(`withdrawQueue/${item.id}`).update({
         status:    "pending",
         updatedAt: Date.now(),
