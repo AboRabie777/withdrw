@@ -31,7 +31,7 @@ const ADMIN_CHAT_ID = "6970148965";
 // ==========================
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 10000;
-const BATCH_DELAY = 5000;
+const BATCH_DELAY = 30000; // 30 ثانية تأخير بين كل سحب
 
 let MAX_WITHDRAWAL_AMOUNT = 10;    // /setmax
 let MIN_WITHDRAWAL_AMOUNT = 0.5;   // /setmin
@@ -140,7 +140,7 @@ async function sendTONWithRetry(toAddress, amount, retryCount = 0) {
     await new Promise(r => setTimeout(r, 2000));
     await contract.sendTransfer({
       secretKey: key.secretKey, seqno,
-      messages: [internal({ to: toAddress, value: nanoAmount, bounce: true, body: "@PandaBamboBot" })],
+      messages: [internal({ to: toAddress, value: nanoAmount, bounce: true })],
     });
     console.log(`✅ Transaction sent`);
     await new Promise(r => setTimeout(r, 5000));
