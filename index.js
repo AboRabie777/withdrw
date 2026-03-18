@@ -31,7 +31,7 @@ const ADMIN_CHAT_ID = "6970148965";
 // ==========================
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 10000;
-const BATCH_DELAY = 3000; // تأخير بسيط 3 ثواني بين السحوبات (فقط للحماية من rate limit)
+const BATCH_DELAY = 10000; // 10 ثواني تأخير بين كل سحب
 
 let MAX_WITHDRAWAL_AMOUNT = 10;    // /setmax
 let MIN_WITHDRAWAL_AMOUNT = 0.5;   // /setmin
@@ -202,31 +202,101 @@ async function adminReply(bot, chatId, text, extra = {}) {
 }
 
 // ==========================
-// 🔹 التحقق من تأكيد المعاملة على الشبكة
+// 🔹 التحقق من تأكيد المعاملة + كشف الـ bounce
 // ==========================
-async function confirmTransaction(expectedSeqno, maxWaitMs = 60000) {
+async function confirmAndVerifyTransaction(expectedSeqno, toAddress, expectedAmount, maxWaitMs = 90000) {
   const start = Date.now();
   console.log(`🔍 Waiting for seqno ${expectedSeqno + 1} to confirm...`);
+
+  // ── الخطوة 1: انتظر ارتفاع الـ seqno ──
+  let seqnoConfirmed = false;
   while (Date.now() - start < maxWaitMs) {
     await new Promise(r => setTimeout(r, 4000));
     try {
       const { contract } = await getWallet();
       const currentSeqno = await contract.getSeqno();
       if (currentSeqno > expectedSeqno) {
-        console.log(`✅ Seqno confirmed: ${expectedSeqno} → ${currentSeqno}`);
-        return true;
+        console.log(`✅ Seqno advanced: ${expectedSeqno} → ${currentSeqno}`);
+        seqnoConfirmed = true;
+        break;
       }
     } catch (e) { console.log(`⚠️ seqno check error: ${e.message}`); }
   }
-  console.log(`⚠️ Seqno confirmation timeout after ${maxWaitMs / 1000}s`);
-  return false;
+
+  if (!seqnoConfirmed) {
+    return { confirmed: false, bounced: false, txHash: null, reason: 'seqno_timeout' };
+  }
+
+  // ── الخطوة 2: انتظر ثواني إضافية ثم افحص الـ transactions ──
+  await new Promise(r => setTimeout(r, 6000));
+
+  try {
+    const txRes  = await fetch(
+      `https://toncenter.com/api/v2/getTransactions?address=${walletAddress}&limit=10`,
+      { headers: { "X-API-Key": process.env.TON_API_KEY } }
+    );
+    const txData = await txRes.json();
+    const txList = txData.result || [];
+
+    // ابحث عن أحدث outgoing tx بعد الـ seqno
+    for (const tx of txList) {
+      const outMsgs = tx.out_msgs || [];
+      for (const msg of outMsgs) {
+        const dest   = msg.destination || '';
+        const value  = Number(msg.value || 0) / 1e9;
+        // هل هي معاملتنا؟
+        if (dest.toLowerCase() === toAddress.toLowerCase() ||
+            Math.abs(value - expectedAmount) < 0.01) {
+
+          const txHash = tx.transaction_id?.hash || null;
+
+          // ── فحص الـ bounce: هل في incoming message بـ bounced=true من نفس العنوان؟ ──
+          const inMsg      = tx.in_msg || {};
+          const isBounced  = inMsg.msg_type === 'ExtIn' ? false :
+                             (inMsg.source?.toLowerCase() === toAddress.toLowerCase() && inMsg.bounced === true);
+
+          if (isBounced) {
+            console.log(`🔴 Transaction BOUNCED from ${toAddress}`);
+            return { confirmed: false, bounced: true, txHash, reason: 'bounced' };
+          }
+
+          // ── فحص ثانوي: هل فيه incoming bounce خلال آخر 10 transactions؟ ──
+          for (const otherTx of txList) {
+            const otherIn = otherTx.in_msg || {};
+            if (
+              otherIn.bounced === true &&
+              otherIn.source?.toLowerCase() === toAddress.toLowerCase() &&
+              Math.abs(Number(otherIn.value || 0) / 1e9 - expectedAmount) < 0.01
+            ) {
+              console.log(`🔴 Bounce detected in incoming messages from ${toAddress}`);
+              return { confirmed: false, bounced: true, txHash, reason: 'bounced_incoming' };
+            }
+          }
+
+          console.log(`✅ Transaction verified on-chain | hash: ${txHash ? txHash.substring(0, 12) + '...' : 'N/A'}`);
+          return { confirmed: true, bounced: false, txHash, reason: 'success' };
+        }
+      }
+    }
+
+    // المعاملة اتأكد الـ seqno بس ما لقيناش التفاصيل — نعتبرها ناجحة مع تحذير
+    const fallbackHash = txList[0]?.transaction_id?.hash || null;
+    console.log(`⚠️ Seqno confirmed but tx details not found — assuming success`);
+    return { confirmed: true, bounced: false, txHash: fallbackHash, reason: 'seqno_only' };
+
+  } catch (e) {
+    console.log(`⚠️ tx verification error: ${e.message}`);
+    // لو فشل الفحص بس الـ seqno اتأكد — نعتبرها ناجحة
+    return { confirmed: true, bounced: false, txHash: null, reason: 'verify_error' };
+  }
 }
 
 // ==========================
-// 🔹 إرسال TON مع إعادة المحاولة + تأكيد على الشبكة
+// 🔹 إرسال TON مع إعادة المحاولة مرتين على أي خطأ
 // ==========================
 async function sendTONWithRetry(toAddress, amount, retryCount = 0) {
-  const roundedAmount = roundAmount(amount);
+  const MAX_TX_RETRIES = 2; // مرتين إعادة محاولة
+  const roundedAmount  = roundAmount(amount);
   if (roundedAmount <= 0) throw new Error(`Invalid amount: ${roundedAmount}`);
 
   const balanceCheck = await checkSufficientBalance(roundedAmount);
@@ -241,39 +311,35 @@ async function sendTONWithRetry(toAddress, amount, retryCount = 0) {
     await new Promise(r => setTimeout(r, 2000));
     await contract.sendTransfer({
       secretKey: key.secretKey, seqno,
-      messages: [internal({ to: toAddress, value: nanoAmount, bounce: true })],
+      messages: [internal({ to: toAddress, value: nanoAmount, bounce: false })],
     });
-    console.log(`📤 Transfer submitted — seqno: ${seqno}`);
+    console.log(`📤 Transfer submitted (attempt ${retryCount + 1}/${MAX_TX_RETRIES + 1}) — seqno: ${seqno} | to: ${toAddress.substring(0, 10)}... | amount: ${roundedAmount} TON`);
 
-    // ✅ انتظر تأكيد الـ seqno على الشبكة (حتى 60 ثانية)
-    const confirmed = await confirmTransaction(seqno, 60000);
-    if (!confirmed) {
-      throw new Error(`Transaction not confirmed on-chain within 60s (seqno ${seqno}) — may be pending or dropped`);
+    // انتظر تأكيد + فحص bounce (حتى 90 ثانية)
+    const result = await confirmAndVerifyTransaction(seqno, toAddress, roundedAmount, 90000);
+
+    if (result.bounced) {
+      throw new Error(`BOUNCED: Transaction rejected and returned to wallet (seqno ${seqno})`);
+    }
+    if (!result.confirmed) {
+      throw new Error(`TIMEOUT: Transaction not confirmed within 90s (seqno ${seqno}) — ${result.reason}`);
     }
 
-    // جلب tx hash بعد التأكيد
-    let txHash = null;
-    try {
-      await new Promise(r => setTimeout(r, 3000));
-      const txRes  = await fetch(`https://toncenter.com/api/v2/getTransactions?address=${walletAddress}&limit=5`, { headers: { "X-API-Key": process.env.TON_API_KEY } });
-      const txData = await txRes.json();
-      if (txData.result?.length > 0) txHash = txData.result[0].transaction_id.hash;
-    } catch (e) { console.log(`⚠️ tx hash fetch failed: ${e.message}`); }
-
-    console.log(`✅ Transaction confirmed on-chain${txHash ? ' | hash: ' + txHash.substring(0, 10) + '...' : ''}`);
-    return { amount: roundedAmount, txHash };
+    console.log(`✅ Transaction successful | attempt: ${retryCount + 1} | reason: ${result.reason}${result.txHash ? ' | hash: ' + result.txHash.substring(0, 12) + '...' : ''}`);
+    return { amount: roundedAmount, txHash: result.txHash };
 
   } catch (error) {
-    console.log(`❌ Attempt ${retryCount + 1} failed: ${error.message}`);
-    // لا نعيد المحاولة لو المشكلة في التأكيد — المعاملة ممكن تكون اتبعتت فعلاً
-    const isNetworkRetryable = retryCount < MAX_RETRIES - 1 &&
-      (error.message.includes('500') || error.message.includes('timeout') || error.message.includes('network')) &&
-      !error.message.includes('not confirmed on-chain');
-    if (isNetworkRetryable) {
-      await new Promise(r => setTimeout(r, RETRY_DELAY * (retryCount + 1)));
+    console.log(`❌ Attempt ${retryCount + 1}/${MAX_TX_RETRIES + 1} failed: ${error.message}`);
+
+    if (retryCount < MAX_TX_RETRIES) {
+      const waitSec = 15 * (retryCount + 1); // 15ث بعد المحاولة الأولى، 30ث بعد الثانية
+      console.log(`⏳ Retrying in ${waitSec}s... (attempt ${retryCount + 2}/${MAX_TX_RETRIES + 1})`);
+      await new Promise(r => setTimeout(r, waitSec * 1000));
       return sendTONWithRetry(toAddress, amount, retryCount + 1);
     }
-    throw error;
+
+    // فشل كل المحاولات — ارمي الخطأ مع علامة FINAL
+    throw new Error(`FINAL_FAIL after ${MAX_TX_RETRIES + 1} attempts: ${error.message}`);
   }
 }
 
@@ -484,7 +550,48 @@ async function processWithdrawal(withdrawId, data) {
   } catch (error) {
     console.log(`❌ processWithdrawal: ${error.message}`);
     const attempts = (data.attempts || 0) + 1;
-    // دايماً pending — مش failed — عشان يتعالج مرة تانية
+    const isFinal  = error.message.startsWith('FINAL_FAIL');
+    const isBounce = error.message.includes('BOUNCED');
+
+    // 🔴 فشل نهائي بعد كل المحاولات أو bounce — علّق وأبلغ الأدمن
+    if (isFinal || isBounce) {
+      const statusLabel = isBounce ? 'bounced' : 'failed_all_retries';
+      await db.ref(`withdrawQueue/${withdrawId}`).update({
+        status:    statusLabel,
+        updatedAt: Date.now(),
+        lastError: error.message,
+        attempts,
+      });
+      if (data.userId && data.wdId) {
+        await db.ref(`users/${data.userId}/wdHistory/${data.wdId}`).update({ status: statusLabel, updatedAt: Date.now() });
+      }
+
+      // إشعار الأدمن
+      if (botInstance) {
+        const roundedAmount = roundAmount(data.ton);
+        const icon    = isBounce ? '🔴 Bounce' : '⛔ فشل نهائي';
+        const detail  = isBounce
+          ? 'المعاملة رُفضت والفلوس رجعت للمحفظة'
+          : 'فشلت 3 محاولات متتالية — تحقق من الشبكة والرصيد';
+
+        await botInstance.sendMessage(ADMIN_CHAT_ID,
+          `${icon}\n\n` +
+          `${detail}\n\n` +
+          `🆔 <code>${withdrawId}</code>\n` +
+          `👤 User: <code>${data.userId || '?'}</code>\n` +
+          `💰 المبلغ: <b>${roundedAmount} TON</b>\n` +
+          `📬 المحفظة:\n<code>${data.address || '?'}</code>\n\n` +
+          `⚠️ <i>${error.message.substring(0, 200)}</i>`,
+          { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[
+            { text: "🔄 أعد المعالجة", callback_data: `reprocess_wd:${withdrawId}` },
+            { text: "❌ إلغاء",         callback_data: `reject_wd:${withdrawId}`    },
+          ]]}}
+        ).catch(e => console.log(`❌ admin notify error: ${e.message}`));
+      }
+      return false;
+    }
+
+    // أخطاء مؤقتة — نرجّع لـ pending عشان يتعالج مرة تانية
     await db.ref(`withdrawQueue/${withdrawId}`).update({
       status: "pending", updatedAt: Date.now(), lastError: error.message, attempts
     });
@@ -1000,6 +1107,25 @@ function startWelcomeBot() {
     const data   = query.data || '';
     const chatId = query.message.chat.id;
     const msgId  = query.message.message_id;
+
+    // ── إعادة معالجة bounced ──
+    if (data.startsWith('reprocess_wd:')) {
+      const withdrawId = data.replace('reprocess_wd:', '').trim();
+      try {
+        const snap = await db.ref(`withdrawQueue/${withdrawId}`).once("value");
+        const wd   = snap.val();
+        if (!wd) { await bot.answerCallbackQuery(query.id, { text: "❌ السحب غير موجود!" }); return; }
+        await db.ref(`withdrawQueue/${withdrawId}`).update({ status: "pending", updatedAt: Date.now(), lastError: null });
+        await bot.editMessageText(
+          query.message.text + `\n\n🔄 <b>تمت إعادة الإضافة للمعالجة</b>`,
+          { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
+        );
+        await bot.answerCallbackQuery(query.id, { text: "🔄 تمت إعادة الإضافة للقائمة" });
+        setTimeout(() => processPendingWithdrawals(), 1000);
+      } catch (e) {
+        await bot.answerCallbackQuery(query.id, { text: `❌ خطأ: ${e.message}` });
+      }
+    }
 
     // ── موافقة ──
     if (data.startsWith('approve_wd:')) {
