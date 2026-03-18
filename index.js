@@ -292,11 +292,16 @@ async function confirmAndVerifyTransaction(expectedSeqno, toAddress, expectedAmo
 }
 
 // ==========================
-// 🔹 إرسال TON مع إعادة المحاولة مرتين على أي خطأ
+// 🔹 إرسال TON مع إعادة المحاولة
 // ==========================
 async function sendTONWithRetry(toAddress, amount, retryCount = 0) {
-  const MAX_TX_RETRIES = 2; // مرتين إعادة محاولة
-  const roundedAmount  = roundAmount(amount);
+  //  Bounce   → نعيد مرة واحدة فقط (الفلوس رجعت = آمن للإعادة)
+  //  Timeout  → نوقف فوراً (الفلوس ممكن تكون راحت، خطر الإرسال مرتين)
+  //  شبكة    → نعيد مرتين
+  const MAX_BOUNCE_RETRIES  = 1;
+  const MAX_NETWORK_RETRIES = 2;
+
+  const roundedAmount = roundAmount(amount);
   if (roundedAmount <= 0) throw new Error(`Invalid amount: ${roundedAmount}`);
 
   const balanceCheck = await checkSufficientBalance(roundedAmount);
@@ -313,33 +318,50 @@ async function sendTONWithRetry(toAddress, amount, retryCount = 0) {
       secretKey: key.secretKey, seqno,
       messages: [internal({ to: toAddress, value: nanoAmount, bounce: false })],
     });
-    console.log(`📤 Transfer submitted (attempt ${retryCount + 1}/${MAX_TX_RETRIES + 1}) — seqno: ${seqno} | to: ${toAddress.substring(0, 10)}... | amount: ${roundedAmount} TON`);
+    console.log(`📤 Transfer submitted (attempt ${retryCount + 1}) — seqno: ${seqno} | to: ${toAddress.substring(0, 10)}... | amount: ${roundedAmount} TON`);
 
     // انتظر تأكيد + فحص bounce (حتى 90 ثانية)
     const result = await confirmAndVerifyTransaction(seqno, toAddress, roundedAmount, 90000);
 
     if (result.bounced) {
-      throw new Error(`BOUNCED: Transaction rejected and returned to wallet (seqno ${seqno})`);
+      throw new Error(`BOUNCED:seqno=${seqno}`);
     }
     if (!result.confirmed) {
-      throw new Error(`TIMEOUT: Transaction not confirmed within 90s (seqno ${seqno}) — ${result.reason}`);
+      throw new Error(`TIMEOUT:seqno=${seqno}:reason=${result.reason}`);
     }
 
     console.log(`✅ Transaction successful | attempt: ${retryCount + 1} | reason: ${result.reason}${result.txHash ? ' | hash: ' + result.txHash.substring(0, 12) + '...' : ''}`);
     return { amount: roundedAmount, txHash: result.txHash };
 
   } catch (error) {
-    console.log(`❌ Attempt ${retryCount + 1}/${MAX_TX_RETRIES + 1} failed: ${error.message}`);
+    const msg = error.message;
+    console.log(`❌ Attempt ${retryCount + 1} failed: ${msg}`);
 
-    if (retryCount < MAX_TX_RETRIES) {
-      const waitSec = 15 * (retryCount + 1); // 15ث بعد المحاولة الأولى، 30ث بعد الثانية
-      console.log(`⏳ Retrying in ${waitSec}s... (attempt ${retryCount + 2}/${MAX_TX_RETRIES + 1})`);
+    // ── Bounce: الفلوس رجعت → نعيد مرة واحدة فقط ──
+    if (msg.startsWith('BOUNCED:')) {
+      if (retryCount < MAX_BOUNCE_RETRIES) {
+        console.log(`🔁 Bounce detected — retrying once after 15s (attempt ${retryCount + 2})`);
+        await new Promise(r => setTimeout(r, 15000));
+        return sendTONWithRetry(toAddress, amount, retryCount + 1);
+      }
+      throw new Error(`FINAL_FAIL:BOUNCED_TWICE — bounced on all ${MAX_BOUNCE_RETRIES + 1} attempts`);
+    }
+
+    // ── Timeout: الفلوس مش متأكد وضعها → وقف فوراً لا نعيد ──
+    if (msg.startsWith('TIMEOUT:')) {
+      throw new Error(`FINAL_FAIL:TIMEOUT — ${msg} — stopped immediately to avoid double-send`);
+    }
+
+    // ── أخطاء شبكة (500 / network): نعيد مرتين ──
+    const isNetworkError = msg.includes('500') || msg.toLowerCase().includes('timeout') || msg.toLowerCase().includes('network');
+    if (isNetworkError && retryCount < MAX_NETWORK_RETRIES) {
+      const waitSec = 15 * (retryCount + 1);
+      console.log(`🔁 Network error — retrying in ${waitSec}s (attempt ${retryCount + 2}/${MAX_NETWORK_RETRIES + 1})`);
       await new Promise(r => setTimeout(r, waitSec * 1000));
       return sendTONWithRetry(toAddress, amount, retryCount + 1);
     }
 
-    // فشل كل المحاولات — ارمي الخطأ مع علامة FINAL
-    throw new Error(`FINAL_FAIL after ${MAX_TX_RETRIES + 1} attempts: ${error.message}`);
+    throw new Error(`FINAL_FAIL:${msg}`);
   }
 }
 
