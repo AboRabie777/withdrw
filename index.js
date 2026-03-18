@@ -105,6 +105,23 @@ async function getWalletBalance() {
   } catch (e) { console.log(`❌ getWalletBalance: ${e.message}`); return 0; }
 }
 
+// ==========================
+// 🔹 فحص الحظر
+// ==========================
+async function isWalletBanned(address) {
+  try {
+    const snap = await db.ref(`bannedWallets/${address.replace(/[.$#[\]/]/g, '_')}`).once("value");
+    return snap.exists();
+  } catch { return false; }
+}
+
+async function isUserBanned(userId) {
+  try {
+    const snap = await db.ref(`bannedUsers/${userId}`).once("value");
+    return snap.exists();
+  } catch { return false; }
+}
+
 async function checkSufficientBalance(requiredAmount) {
   const balance = await getWalletBalance();
   return {
@@ -281,6 +298,22 @@ async function processWithdrawal(withdrawId, data) {
       return true;
     }
 
+    // 🚫 فحص حظر المستخدم
+    if (userId && await isUserBanned(userId)) {
+      console.log(`🚫 Banned user: ${userId} — cancelling ${withdrawId}`);
+      await db.ref(`withdrawQueue/${withdrawId}`).update({ status: "cancelled", error: "User is banned", updatedAt: Date.now() });
+      if (wdId) await db.ref(`users/${userId}/wdHistory/${wdId}`).update({ status: "cancelled", updatedAt: Date.now() });
+      return true;
+    }
+
+    // 🚫 فحص حظر المحفظة
+    if (await isWalletBanned(data.address)) {
+      console.log(`🚫 Banned wallet: ${data.address} — cancelling ${withdrawId}`);
+      await db.ref(`withdrawQueue/${withdrawId}`).update({ status: "cancelled", error: "Wallet is banned", updatedAt: Date.now() });
+      if (userId && wdId) await db.ref(`users/${userId}/wdHistory/${wdId}`).update({ status: "cancelled", updatedAt: Date.now() });
+      return true;
+    }
+
     // تحقق من الحدود — نتركه pending لأن الأدمن قد يغير الحد لاحقاً
     if (roundedAmount > MAX_WITHDRAWAL_AMOUNT) {
       console.log(`⏸ ${withdrawId} exceeds max (${roundedAmount} > ${MAX_WITHDRAWAL_AMOUNT} TON) — keeping pending`);
@@ -433,7 +466,13 @@ function startWelcomeBot() {
       `/cancel <code>[wdId]</code> — إلغاء سحب معلق\n\n` +
       `⏸ <b>System</b>\n` +
       `/pause — إيقاف المعالجة التلقائية\n` +
-      `/resume — استئناف المعالجة\n`
+      `/resume — استئناف المعالجة\n\n` +
+      `🚫 <b>Ban</b>\n` +
+      `/banwallet <code>[address]</code> — حظر محفظة TON\n` +
+      `/unbanwallet <code>[address]</code> — فك حظر محفظة\n` +
+      `/banuser <code>[userId]</code> — حظر مستخدم\n` +
+      `/unbanuser <code>[userId]</code> — فك حظر مستخدم\n` +
+      `/banlists — عرض قوائم الحظر\n`
     );
   });
 
@@ -616,6 +655,94 @@ function startWelcomeBot() {
     await adminReply(bot, msg.chat.id, "🔄 جاري المعالجة...");
     await processPendingWithdrawals();
     await adminReply(bot, msg.chat.id, "✅ انتهت المعالجة");
+  });
+
+  // ─── /banwallet [address] ─────────────────────────────
+  bot.onText(/\/banwallet(?:\s+(.+))?/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const address = (match[1] || '').trim();
+    if (!address) {
+      await adminReply(bot, msg.chat.id, `❌ الاستخدام: /banwallet <code>EQxxx...</code>`);
+      return;
+    }
+    const key = address.replace(/[.$#[\]/]/g, '_');
+    await db.ref(`bannedWallets/${key}`).set({ address, bannedAt: Date.now() });
+    console.log(`🚫 Wallet banned: ${address}`);
+    await adminReply(bot, msg.chat.id, `🚫 <b>تم حظر المحفظة:</b>\n<code>${address}</code>\n\nأي سحب لهذه المحفظة سيُلغى تلقائياً.`);
+  });
+
+  // ─── /unbanwallet [address] ───────────────────────────
+  bot.onText(/\/unbanwallet(?:\s+(.+))?/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const address = (match[1] || '').trim();
+    if (!address) {
+      await adminReply(bot, msg.chat.id, `❌ الاستخدام: /unbanwallet <code>EQxxx...</code>`);
+      return;
+    }
+    const key = address.replace(/[.$#[\]/]/g, '_');
+    const snap = await db.ref(`bannedWallets/${key}`).once("value");
+    if (!snap.exists()) {
+      await adminReply(bot, msg.chat.id, `⚠️ المحفظة غير محظورة:\n<code>${address}</code>`);
+      return;
+    }
+    await db.ref(`bannedWallets/${key}`).remove();
+    console.log(`✅ Wallet unbanned: ${address}`);
+    await adminReply(bot, msg.chat.id, `✅ <b>تم فك حظر المحفظة:</b>\n<code>${address}</code>`);
+  });
+
+  // ─── /banuser [userId] ────────────────────────────────
+  bot.onText(/\/banuser(?:\s+(.+))?/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const userId = (match[1] || '').trim();
+    if (!userId) {
+      await adminReply(bot, msg.chat.id, `❌ الاستخدام: /banuser <code>123456789</code>`);
+      return;
+    }
+    await db.ref(`bannedUsers/${userId}`).set({ userId, bannedAt: Date.now() });
+    console.log(`🚫 User banned: ${userId}`);
+    await adminReply(bot, msg.chat.id, `🚫 <b>تم حظر المستخدم:</b> <code>${userId}</code>\n\nأي سحب لهذا المستخدم سيُلغى تلقائياً.`);
+  });
+
+  // ─── /unbanuser [userId] ──────────────────────────────
+  bot.onText(/\/unbanuser(?:\s+(.+))?/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const userId = (match[1] || '').trim();
+    if (!userId) {
+      await adminReply(bot, msg.chat.id, `❌ الاستخدام: /unbanuser <code>123456789</code>`);
+      return;
+    }
+    const snap = await db.ref(`bannedUsers/${userId}`).once("value");
+    if (!snap.exists()) {
+      await adminReply(bot, msg.chat.id, `⚠️ المستخدم غير محظور: <code>${userId}</code>`);
+      return;
+    }
+    await db.ref(`bannedUsers/${userId}`).remove();
+    console.log(`✅ User unbanned: ${userId}`);
+    await adminReply(bot, msg.chat.id, `✅ <b>تم فك حظر المستخدم:</b> <code>${userId}</code>`);
+  });
+
+  // ─── /banlists ────────────────────────────────────────
+  bot.onText(/\/banlists/, async (msg) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    try {
+      const [walletsSnap, usersSnap] = await Promise.all([
+        db.ref("bannedWallets").once("value"),
+        db.ref("bannedUsers").once("value"),
+      ]);
+      const wallets = walletsSnap.val() ? Object.values(walletsSnap.val()) : [];
+      const users   = usersSnap.val()   ? Object.values(usersSnap.val())   : [];
+
+      let text = `🚫 <b>قوائم الحظر</b>\n\n`;
+      text += `💳 <b>محافظ محظورة (${wallets.length}):</b>\n`;
+      if (wallets.length === 0) text += `— لا يوجد\n`;
+      else wallets.forEach(w => { text += `• <code>${w.address}</code>\n`; });
+
+      text += `\n👤 <b>مستخدمون محظورون (${users.length}):</b>\n`;
+      if (users.length === 0) text += `— لا يوجد\n`;
+      else users.forEach(u => { text += `• <code>${u.userId}</code>\n`; });
+
+      await adminReply(bot, msg.chat.id, text);
+    } catch (e) { await adminReply(bot, msg.chat.id, `❌ ${e.message}`); }
   });
 
   bot.on('polling_error', () => {});
