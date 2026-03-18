@@ -31,7 +31,7 @@ const ADMIN_CHAT_ID = "6970148965";
 // ==========================
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 10000;
-const BATCH_DELAY = 30000; // 30 ثانية تأخير بين كل سحب
+const BATCH_DELAY = 3000; // تأخير بسيط 3 ثواني بين السحوبات (فقط للحماية من rate limit)
 
 let MAX_WITHDRAWAL_AMOUNT = 10;    // /setmax
 let MIN_WITHDRAWAL_AMOUNT = 0.5;   // /setmin
@@ -81,6 +81,7 @@ let walletKey      = null;
 let walletAddress  = null;
 let isProcessing   = false;
 const processingQueue = new Set();
+let botInstance    = null; // مرجع البوت للاستخدام خارج startWelcomeBot
 
 // ==========================
 // 🔹 إنشاء المحفظة
@@ -122,6 +123,67 @@ async function isUserBanned(userId) {
   } catch { return false; }
 }
 
+// ==========================
+// 🔹 فحص عدد السحوبات اليومية
+// ==========================
+async function getUserDailyWithdrawalCount(userId) {
+  try {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const snap = await db.ref("withdrawQueue")
+      .orderByChild("userId").equalTo(userId).once("value");
+    if (!snap.exists()) return 0;
+    let count = 0;
+    snap.forEach(child => {
+      const d = child.val();
+      const ts = d.ts || d.timestamp || 0;
+      const status = d.status || '';
+      // عد السحوبات المدفوعة + المعالجة + المعلقة + بانتظار موافقة اليوم
+      if (ts >= startOfDay.getTime() && ['paid', 'processing', 'pending', 'awaiting_approval'].includes(status)) {
+        count++;
+      }
+    });
+    return count;
+  } catch (e) { console.log(`❌ getUserDailyWithdrawalCount: ${e.message}`); return 0; }
+}
+
+// ==========================
+// 🔹 إشعار الأدمن بطلب موافقة على سحب
+// ==========================
+async function sendAdminApprovalRequest(botInstance, withdrawId, data, dailyCount) {
+  const roundedAmount = roundAmount(data.ton);
+  const userId        = data.userId || 'unknown';
+  const address       = data.address || '—';
+  const amountCoins   = data.amt || 0;
+  const requestTime   = new Date(data.ts || Date.now()).toLocaleString('en-GB', { timeZone: 'UTC', hour12: false });
+
+  const text =
+    `⚠️ <b>سحب يحتاج موافقة</b>\n\n` +
+    `👤 User: <code>${userId}</code>\n` +
+    `📅 عدد السحوبات اليوم: <b>${dailyCount}</b> (تجاوز الحد المسموح)\n\n` +
+    `━━━━━━━━━━━━━━━━\n` +
+    `🆔 ID: <code>${withdrawId}</code>\n` +
+    `💰 المبلغ: <b>${roundedAmount} TON</b>\n` +
+    `🪙 Bamboo: <b>${Number(amountCoins).toLocaleString()}</b>\n` +
+    `📬 المحفظة:\n<code>${address}</code>\n` +
+    `🕐 الوقت: ${requestTime} UTC\n` +
+    `━━━━━━━━━━━━━━━━\n\n` +
+    `هل توافق على هذا السحب؟`;
+
+  try {
+    await botInstance.sendMessage(ADMIN_CHAT_ID, text, {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "✅ موافقة — ادفع الآن", callback_data: `approve_wd:${withdrawId}` },
+          { text: "❌ رفض — إلغاء",        callback_data: `reject_wd:${withdrawId}`  },
+        ]]
+      }
+    });
+    console.log(`📨 Approval request sent for ${withdrawId}`);
+  } catch (e) { console.log(`❌ sendAdminApprovalRequest: ${e.message}`); }
+}
+
 async function checkSufficientBalance(requiredAmount) {
   const balance = await getWalletBalance();
   return {
@@ -140,7 +202,28 @@ async function adminReply(bot, chatId, text, extra = {}) {
 }
 
 // ==========================
-// 🔹 إرسال TON مع إعادة المحاولة
+// 🔹 التحقق من تأكيد المعاملة على الشبكة
+// ==========================
+async function confirmTransaction(expectedSeqno, maxWaitMs = 60000) {
+  const start = Date.now();
+  console.log(`🔍 Waiting for seqno ${expectedSeqno + 1} to confirm...`);
+  while (Date.now() - start < maxWaitMs) {
+    await new Promise(r => setTimeout(r, 4000));
+    try {
+      const { contract } = await getWallet();
+      const currentSeqno = await contract.getSeqno();
+      if (currentSeqno > expectedSeqno) {
+        console.log(`✅ Seqno confirmed: ${expectedSeqno} → ${currentSeqno}`);
+        return true;
+      }
+    } catch (e) { console.log(`⚠️ seqno check error: ${e.message}`); }
+  }
+  console.log(`⚠️ Seqno confirmation timeout after ${maxWaitMs / 1000}s`);
+  return false;
+}
+
+// ==========================
+// 🔹 إرسال TON مع إعادة المحاولة + تأكيد على الشبكة
 // ==========================
 async function sendTONWithRetry(toAddress, amount, retryCount = 0) {
   const roundedAmount = roundAmount(amount);
@@ -154,28 +237,39 @@ async function sendTONWithRetry(toAddress, amount, retryCount = 0) {
     const { contract, key } = await getWallet();
     const seqno      = await contract.getSeqno();
     const nanoAmount = toNano(roundedAmount.toFixed(3));
+
     await new Promise(r => setTimeout(r, 2000));
     await contract.sendTransfer({
       secretKey: key.secretKey, seqno,
       messages: [internal({ to: toAddress, value: nanoAmount, bounce: true })],
     });
-    console.log(`✅ Transaction sent`);
-    await new Promise(r => setTimeout(r, 5000));
+    console.log(`📤 Transfer submitted — seqno: ${seqno}`);
 
-    // جلب tx hash
+    // ✅ انتظر تأكيد الـ seqno على الشبكة (حتى 60 ثانية)
+    const confirmed = await confirmTransaction(seqno, 60000);
+    if (!confirmed) {
+      throw new Error(`Transaction not confirmed on-chain within 60s (seqno ${seqno}) — may be pending or dropped`);
+    }
+
+    // جلب tx hash بعد التأكيد
     let txHash = null;
     try {
+      await new Promise(r => setTimeout(r, 3000));
       const txRes  = await fetch(`https://toncenter.com/api/v2/getTransactions?address=${walletAddress}&limit=5`, { headers: { "X-API-Key": process.env.TON_API_KEY } });
       const txData = await txRes.json();
       if (txData.result?.length > 0) txHash = txData.result[0].transaction_id.hash;
     } catch (e) { console.log(`⚠️ tx hash fetch failed: ${e.message}`); }
 
+    console.log(`✅ Transaction confirmed on-chain${txHash ? ' | hash: ' + txHash.substring(0, 10) + '...' : ''}`);
     return { amount: roundedAmount, txHash };
 
   } catch (error) {
     console.log(`❌ Attempt ${retryCount + 1} failed: ${error.message}`);
-    if (retryCount < MAX_RETRIES - 1 &&
-        (error.message.includes('500') || error.message.includes('timeout') || error.message.includes('network'))) {
+    // لا نعيد المحاولة لو المشكلة في التأكيد — المعاملة ممكن تكون اتبعتت فعلاً
+    const isNetworkRetryable = retryCount < MAX_RETRIES - 1 &&
+      (error.message.includes('500') || error.message.includes('timeout') || error.message.includes('network')) &&
+      !error.message.includes('not confirmed on-chain');
+    if (isNetworkRetryable) {
       await new Promise(r => setTimeout(r, RETRY_DELAY * (retryCount + 1)));
       return sendTONWithRetry(toAddress, amount, retryCount + 1);
     }
@@ -314,6 +408,27 @@ async function processWithdrawal(withdrawId, data) {
       return true;
     }
 
+    // ⏳ لو الطلب بانتظار موافقة الأدمن — لا تعالجه تلقائياً
+    if (data.status === 'awaiting_approval') {
+      console.log(`⏳ ${withdrawId} awaiting admin approval — skipping auto-process`);
+      return false;
+    }
+
+    // 📅 فحص عدد السحوبات اليومية
+    if (userId) {
+      const dailyCount = await getUserDailyWithdrawalCount(userId);
+      if (dailyCount > 2) {
+        console.log(`📅 User ${userId} exceeded daily limit (${dailyCount} withdrawals) — awaiting approval`);
+        await db.ref(`withdrawQueue/${withdrawId}`).update({
+          status:    "awaiting_approval",
+          updatedAt: Date.now(),
+          holdReason: `تجاوز الحد اليومي — ${dailyCount} سحوبات اليوم`,
+        });
+        if (botInstance) await sendAdminApprovalRequest(botInstance, withdrawId, data, dailyCount);
+        return false;
+      }
+    }
+
     // تحقق من الحدود — نتركه pending لأن الأدمن قد يغير الحد لاحقاً
     if (roundedAmount > MAX_WITHDRAWAL_AMOUNT) {
       console.log(`⏸ ${withdrawId} exceeds max (${roundedAmount} > ${MAX_WITHDRAWAL_AMOUNT} TON) — keeping pending`);
@@ -390,7 +505,7 @@ async function processPendingWithdrawals() {
     if (!withdrawals) { console.log("📭 No pending withdrawals"); isProcessing = false; return; }
 
     const list = Object.entries(withdrawals)
-      .filter(([id]) => !processingQueue.has(id))
+      .filter(([id, d]) => !processingQueue.has(id))
       .map(([id, d]) => ({ id, data: d, timestamp: d.ts || d.timestamp || 0 }))
       .sort((a, b) => a.timestamp - b.timestamp);
 
@@ -424,6 +539,7 @@ function startWelcomeBot() {
   if (!botToken) { console.log("⚠️ TELEGRAM_BOT_TOKEN missing"); return; }
 
   const bot = new TelegramBot(botToken, { polling: true });
+  botInstance = bot;
 
   const isAdmin = (msg) => msg.chat.id.toString() === ADMIN_CHAT_ID;
   const unauth  = async (msg) => await bot.sendMessage(msg.chat.id, "⛔ Unauthorized");
@@ -449,30 +565,44 @@ function startWelcomeBot() {
   bot.onText(/\/help/, async (msg) => {
     if (!isAdmin(msg)) return;
     await adminReply(bot, msg.chat.id,
-      `🛠 <b>Admin Commands</b>\n\n` +
-      `📊 <b>Info</b>\n` +
-      `/status — حالة النظام الكاملة\n` +
-      `/balance — رصيد المحفظة + قائمة الانتظار\n` +
-      `/checkbalance — فحص الرصيد الآن\n\n` +
-      `⚙️ <b>Limits</b>\n` +
-      `/setmax <code>[TON]</code> — الحد الأقصى للسحب الواحد\n` +
-      `/setmin <code>[TON]</code> — الحد الأدنى للسحب الواحد\n` +
-      `/setbuffer <code>[TON]</code> — هامش الأمان في المحفظة\n` +
+      `🐼 <b>Panda Bamboo — Admin Commands</b>\n` +
+      `${'─'.repeat(30)}\n\n` +
+
+      `📊 <b>المعلومات والمراقبة</b>\n` +
+      `/status — حالة النظام الكاملة (رصيد، pending، paid، failed، الحدود)\n` +
+      `/balance — رصيد المحفظة + عدد السحوبات المعلقة وإجماليها\n` +
+      `/checkbalance — فحص الرصيد الفوري للمحفظة\n` +
+      `/checkuser <code>[userId]</code> — تقرير مفصّل لمستخدم: إيداعاته، سحوباته، إحالاته، رصيده\n\n` +
+
+      `📋 <b>إدارة قائمة السحوبات</b>\n` +
+      `/queue — عرض السحوبات المعلقة (pending) مرتبة من الأقدم\n` +
+      `/queueall — آخر 30 سحب بكل الحالات (pending / paid / failed)\n` +
+      `/pending_reasons — السحوبات المعلقة مع سبب تعليق كل واحدة بالتفصيل\n` +
+      `/process — تشغيل دورة المعالجة يدوياً الآن\n` +
+      `/cancel <code>[wdId]</code> — إلغاء سحب معلق بالـ ID\n\n` +
+
+      `⚙️ <b>ضبط الحدود والإعدادات</b>\n` +
+      `/setmax <code>[TON]</code> — تغيير الحد الأقصى للسحب الواحد\n` +
+      `/setmin <code>[TON]</code> — تغيير الحد الأدنى للسحب الواحد\n` +
+      `/setbuffer <code>[TON]</code> — هامش الأمان المحجوز في المحفظة\n` +
       `/setrate <code>[N]</code> — سعر الصرف (1 TON = N Bamboo)\n\n` +
-      `📋 <b>Queue</b>\n` +
-      `/queue — عرض السحوبات المعلقة\n` +
-      `/queueall — عرض كل السحوبات (pending+paid+failed)\n` +
-      `/process — تشغيل المعالجة يدوياً\n` +
-      `/cancel <code>[wdId]</code> — إلغاء سحب معلق\n\n` +
-      `⏸ <b>System</b>\n` +
-      `/pause — إيقاف المعالجة التلقائية\n` +
-      `/resume — استئناف المعالجة\n\n` +
-      `🚫 <b>Ban</b>\n` +
-      `/banwallet <code>[address]</code> — حظر محفظة TON\n` +
-      `/unbanwallet <code>[address]</code> — فك حظر محفظة\n` +
-      `/banuser <code>[userId]</code> — حظر مستخدم\n` +
+
+      `⏸ <b>التحكم في النظام</b>\n` +
+      `/pause — إيقاف المعالجة التلقائية مؤقتاً\n` +
+      `/resume — استئناف المعالجة التلقائية\n\n` +
+
+      `🚫 <b>الحظر وفك الحظر</b>\n` +
+      `/banuser <code>[userId]</code> — حظر مستخدم (تُلغى سحوباته تلقائياً)\n` +
       `/unbanuser <code>[userId]</code> — فك حظر مستخدم\n` +
-      `/banlists — عرض قوائم الحظر\n`
+      `/banwallet <code>[address]</code> — حظر محفظة TON بعينها\n` +
+      `/unbanwallet <code>[address]</code> — فك حظر محفظة\n` +
+      `/banlists — عرض كل المستخدمين والمحافظ المحظورة\n\n` +
+
+      `${'─'.repeat(30)}\n` +
+      `💡 <b>ملاحظات:</b>\n` +
+      `• السحب الثالث فأكثر في اليوم يحتاج موافقتك\n` +
+      `• الموافقة/الرفض بيجيلك زرار مباشرةً في الرسالة\n` +
+      `• المعالجة التلقائية كل 60 ثانية + تأخير 30ث بين كل سحب`
     );
   });
 
@@ -721,6 +851,125 @@ function startWelcomeBot() {
     await adminReply(bot, msg.chat.id, `✅ <b>تم فك حظر المستخدم:</b> <code>${userId}</code>`);
   });
 
+  // ─── /checkuser [userId] ──────────────────────────────
+  bot.onText(/\/checkuser(?:\s+(.+))?/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const userId = (match[1] || '').trim();
+    if (!userId) {
+      await adminReply(bot, msg.chat.id, `❌ الاستخدام: /checkuser <code>123456789</code>`);
+      return;
+    }
+    try {
+      await adminReply(bot, msg.chat.id, `🔍 جاري جلب بيانات المستخدم <code>${userId}</code>...`);
+
+      // ── جلب كل البيانات بالتوازي ──
+      const [depositsSnap, wdQueueSnap, referralsSnap, userSnap, bannedSnap] = await Promise.all([
+        db.ref(`users/${userId}/deposits`).once("value"),
+        db.ref("withdrawQueue").orderByChild("userId").equalTo(userId).once("value"),
+        db.ref(`users/${userId}/referrals`).once("value"),
+        db.ref(`users/${userId}`).once("value"),
+        db.ref(`bannedUsers/${userId}`).once("value"),
+      ]);
+
+      // ── إجمالي الإيداعات ──
+      let totalDeposits    = 0;
+      let depositCount     = 0;
+      let lastDepositDate  = null;
+      if (depositsSnap.exists()) {
+        depositsSnap.forEach(child => {
+          const d = child.val();
+          totalDeposits += Number(d.amount || 0);
+          depositCount++;
+          const ts = d.timestamp || 0;
+          if (!lastDepositDate || ts > lastDepositDate) lastDepositDate = ts;
+        });
+      }
+
+      // ── إجمالي السحوبات (مقسّمة حسب الحالة) ──
+      let totalPaid        = 0;  let paidCount    = 0;
+      let totalPending     = 0;  let pendingCount = 0;
+      let totalCancelled   = 0;  let cancelCount  = 0;
+      let awaitingCount    = 0;
+      let lastWdDate       = null;
+
+      if (wdQueueSnap.exists()) {
+        wdQueueSnap.forEach(child => {
+          const d   = child.val();
+          const amt = roundAmount(d.ton || 0);
+          const ts  = d.ts || d.timestamp || 0;
+          if (!lastWdDate || ts > lastWdDate) lastWdDate = ts;
+
+          if (d.status === 'paid')               { totalPaid      += amt; paidCount++;    }
+          else if (d.status === 'pending')        { totalPending   += amt; pendingCount++; }
+          else if (d.status === 'cancelled')      { totalCancelled += amt; cancelCount++;  }
+          else if (d.status === 'awaiting_approval') { totalPending += amt; awaitingCount++; }
+        });
+      }
+
+      // ── الإحالات ──
+      const referralCount = referralsSnap.exists() ? Object.keys(referralsSnap.val()).length : 0;
+
+      // ── بيانات المستخدم الأساسية ──
+      const userData   = userSnap.val() || {};
+      const balance    = userData.balance    || userData.coins   || 0;
+      const bamboo     = userData.bamboo     || 0;
+      const isBanned   = bannedSnap.exists();
+
+      // ── السحوبات المعلقة التفصيلية ──
+      let pendingDetails = '';
+      if (wdQueueSnap.exists()) {
+        const pendingList = [];
+        wdQueueSnap.forEach(child => {
+          const d = child.val();
+          if (['pending', 'awaiting_approval'].includes(d.status)) {
+            pendingList.push({ id: child.key, ...d });
+          }
+        });
+        if (pendingList.length > 0) {
+          pendingDetails = `\n📋 <b>السحوبات المعلقة:</b>\n`;
+          pendingList.slice(0, 5).forEach(w => {
+            const statusLabel = w.status === 'awaiting_approval' ? '⏳ بانتظار موافقة' : '🔄 pending';
+            const reason = w.holdReason || w.lastError || w.error || '—';
+            pendingDetails +=
+              `  • <code>${w.id}</code> | ${roundAmount(w.ton)} TON | ${statusLabel}\n` +
+              `    ⚠️ ${reason}\n`;
+          });
+          if (pendingList.length > 5) pendingDetails += `  ... و ${pendingList.length - 5} أخرى\n`;
+        }
+      }
+
+      // ── بناء الرسالة ──
+      const formatDate = (ts) => ts ? new Date(ts).toLocaleString('en-GB', { timeZone: 'UTC', hour12: false }) + ' UTC' : '—';
+      const netFlow    = totalDeposits - totalPaid;
+
+      let text =
+        `👤 <b>تقرير المستخدم</b>\n` +
+        `🆔 <code>${userId}</code>${isBanned ? '  🚫 <b>محظور</b>' : ''}\n\n` +
+
+        `━━━━ 💰 الإيداعات ━━━━\n` +
+        `📥 عدد الإيداعات: <b>${depositCount}</b>\n` +
+        `💵 إجمالي المُودع: <b>${totalDeposits.toFixed(4)} TON</b>\n` +
+        (lastDepositDate ? `🕐 آخر إيداع: ${formatDate(lastDepositDate)}\n` : '') +
+
+        `\n━━━━ 💸 السحوبات ━━━━\n` +
+        `✅ مدفوعة: <b>${paidCount} سحب</b> = <b>${totalPaid.toFixed(4)} TON</b>\n` +
+        `🔄 معلقة: <b>${pendingCount + awaitingCount} سحب</b> = <b>${totalPending.toFixed(4)} TON</b>\n` +
+        (awaitingCount > 0 ? `⏳ بانتظار موافقة: <b>${awaitingCount}</b>\n` : '') +
+        `❌ ملغية: <b>${cancelCount} سحب</b>\n` +
+        (lastWdDate ? `🕐 آخر سحب: ${formatDate(lastWdDate)}\n` : '') +
+
+        `\n━━━━ 📊 الملخص ━━━━\n` +
+        `🔄 صافي التدفق: <b>${netFlow >= 0 ? '+' : ''}${netFlow.toFixed(4)} TON</b>\n` +
+        `👥 الإحالات: <b>${referralCount}</b>\n` +
+        (balance ? `🪙 رصيد Coins: <b>${Number(balance).toLocaleString()}</b>\n` : '') +
+        (bamboo  ? `🎋 رصيد Bamboo: <b>${Number(bamboo).toLocaleString()}</b>\n` : '') +
+
+        pendingDetails;
+
+      await adminReply(bot, msg.chat.id, text);
+    } catch (e) { await adminReply(bot, msg.chat.id, `❌ ${e.message}`); }
+  });
+
   // ─── /banlists ────────────────────────────────────────
   bot.onText(/\/banlists/, async (msg) => {
     if (!isAdmin(msg)) { await unauth(msg); return; }
@@ -742,6 +991,121 @@ function startWelcomeBot() {
       else users.forEach(u => { text += `• <code>${u.userId}</code>\n`; });
 
       await adminReply(bot, msg.chat.id, text);
+    } catch (e) { await adminReply(bot, msg.chat.id, `❌ ${e.message}`); }
+  });
+
+  // ─── Callback: موافقة / رفض السحب ────────────────────
+  bot.on('callback_query', async (query) => {
+    if (query.message.chat.id.toString() !== ADMIN_CHAT_ID) return;
+    const data   = query.data || '';
+    const chatId = query.message.chat.id;
+    const msgId  = query.message.message_id;
+
+    // ── موافقة ──
+    if (data.startsWith('approve_wd:')) {
+      const withdrawId = data.replace('approve_wd:', '').trim();
+      try {
+        const snap = await db.ref(`withdrawQueue/${withdrawId}`).once("value");
+        const wd   = snap.val();
+        if (!wd) { await bot.answerCallbackQuery(query.id, { text: "❌ السحب غير موجود!" }); return; }
+        if (wd.status !== 'awaiting_approval') {
+          await bot.answerCallbackQuery(query.id, { text: `⚠️ الحالة الحالية: ${wd.status}` });
+          return;
+        }
+        // ارجع لـ pending عشان processPendingWithdrawals تشتغل بس ضع علم approved
+        await db.ref(`withdrawQueue/${withdrawId}`).update({ status: "pending", approvedByAdmin: true, updatedAt: Date.now(), holdReason: null });
+        await bot.editMessageText(
+          query.message.text + `\n\n✅ <b>تمت الموافقة</b> — جاري الدفع...`,
+          { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
+        );
+        await bot.answerCallbackQuery(query.id, { text: "✅ تمت الموافقة — سيتم الدفع الآن" });
+        console.log(`✅ Admin approved: ${withdrawId}`);
+        // شغّل المعالجة فوراً
+        setTimeout(() => processPendingWithdrawals(), 1000);
+      } catch (e) {
+        await bot.answerCallbackQuery(query.id, { text: `❌ خطأ: ${e.message}` });
+        console.log(`❌ approve_wd error: ${e.message}`);
+      }
+    }
+
+    // ── رفض ──
+    if (data.startsWith('reject_wd:')) {
+      const withdrawId = data.replace('reject_wd:', '').trim();
+      try {
+        const snap = await db.ref(`withdrawQueue/${withdrawId}`).once("value");
+        const wd   = snap.val();
+        if (!wd) { await bot.answerCallbackQuery(query.id, { text: "❌ السحب غير موجود!" }); return; }
+        if (wd.status !== 'awaiting_approval') {
+          await bot.answerCallbackQuery(query.id, { text: `⚠️ الحالة الحالية: ${wd.status}` });
+          return;
+        }
+        await db.ref(`withdrawQueue/${withdrawId}`).update({ status: "cancelled", updatedAt: Date.now(), holdReason: "رُفض من الأدمن" });
+        if (wd.userId && wd.wdId) {
+          await db.ref(`users/${wd.userId}/wdHistory/${wd.wdId}`).update({ status: "cancelled", updatedAt: Date.now() });
+        }
+        await bot.editMessageText(
+          query.message.text + `\n\n❌ <b>تم الرفض والإلغاء</b>`,
+          { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
+        );
+        await bot.answerCallbackQuery(query.id, { text: "❌ تم رفض وإلغاء السحب" });
+        console.log(`❌ Admin rejected: ${withdrawId}`);
+      } catch (e) {
+        await bot.answerCallbackQuery(query.id, { text: `❌ خطأ: ${e.message}` });
+        console.log(`❌ reject_wd error: ${e.message}`);
+      }
+    }
+  });
+
+  // ─── /pending_reasons ─────────────────────────────────
+  bot.onText(/\/pending_reasons/, async (msg) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    try {
+      const snap  = await db.ref("withdrawQueue").orderByChild("status").once("value");
+      const items = snap.val();
+      if (!items) { await adminReply(bot, msg.chat.id, "📭 لا توجد سحوبات"); return; }
+
+      // جمع السحوبات المعلقة بكل أنواعها
+      const held = Object.entries(items)
+        .map(([id, d]) => ({ id, ...d }))
+        .filter(w => ['pending', 'awaiting_approval'].includes(w.status))
+        .sort((a, b) => (a.ts || 0) - (b.ts || 0));
+
+      if (!held.length) { await adminReply(bot, msg.chat.id, "📭 لا توجد سحوبات معلقة حالياً"); return; }
+
+      // إرسال على شكل مجموعات عشان ما يتجاوز حد Telegram
+      const CHUNK = 15;
+      for (let i = 0; i < held.length; i += CHUNK) {
+        const chunk = held.slice(i, i + CHUNK);
+        let text = i === 0
+          ? `📋 <b>السحوبات المعلقة (${held.length})</b>\n\n`
+          : `📋 <b>تابع... (${i + 1}–${Math.min(i + CHUNK, held.length)})</b>\n\n`;
+
+        chunk.forEach((w, idx) => {
+          const ton    = roundAmount(w.ton);
+          const time   = w.ts ? new Date(w.ts).toLocaleString('en-GB', { timeZone: 'UTC', hour12: false }) : '—';
+          const status = w.status === 'awaiting_approval' ? '⏳ بانتظار موافقة' : '🔄 pending';
+
+          // سبب التعليق
+          let reason = '—';
+          if (w.holdReason)  reason = w.holdReason;
+          else if (w.lastError) reason = w.lastError;
+          else if (w.error)     reason = w.error;
+          else if (w.status === 'awaiting_approval') reason = 'تجاوز الحد اليومي';
+          else if (ton > MAX_WITHDRAWAL_AMOUNT)      reason = `يتجاوز الحد الأقصى (${MAX_WITHDRAWAL_AMOUNT} TON)`;
+          else if (ton < MIN_WITHDRAWAL_AMOUNT)      reason = `أقل من الحد الأدنى (${MIN_WITHDRAWAL_AMOUNT} TON)`;
+
+          text +=
+            `${i + idx + 1}. ${status}\n` +
+            `   🆔 <code>${w.id}</code>\n` +
+            `   👤 User: <code>${w.userId || '?'}</code>\n` +
+            `   💰 ${ton} TON | 🪙 ${Number(w.amt || 0).toLocaleString()}\n` +
+            `   ⚠️ السبب: ${reason}\n` +
+            `   🕐 ${time} UTC\n\n`;
+        });
+
+        await adminReply(bot, msg.chat.id, text);
+        if (i + CHUNK < held.length) await new Promise(r => setTimeout(r, 500));
+      }
     } catch (e) { await adminReply(bot, msg.chat.id, `❌ ${e.message}`); }
   });
 
