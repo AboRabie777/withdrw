@@ -32,15 +32,25 @@ const ADMIN_CHAT_ID = "6970148965";
 const MAX_RETRIES         = 3;
 const RETRY_DELAY         = 10000;
 
+// ─── وضع المعالجة: 'batch' أو 'single' ──────
+// batch  = إرسال حتى 10 سحوبات في معاملة واحدة
+// single = إرسال كل سحب منفرداً بالترتيب
+let PROCESSING_MODE       = 'batch'; // القيمة الافتراضية
+
 // ─── إعدادات Batch ──────────────────────────
-const BATCH_SIZE          = 10;   // عدد السحوبات في كل دفعة
+let BATCH_SIZE            = 10;   // عدد السحوبات في كل دفعة (قابل للتغيير)
 const BATCH_FLUSH_SECONDS = 30;   // أرسل ما تبقى كل 30 ثانية حتى لو < BATCH_SIZE
 const BATCH_BETWEEN_DELAY = 3000; // تأخير 3 ثواني بين كل دفعتين (لتجنب rate limit)
+
+// ─── إعدادات Single ─────────────────────────
+let SINGLE_DELAY_MS       = 3000; // تأخير بين كل سحب وآخر في وضع Single
 
 let MAX_WITHDRAWAL_AMOUNT = 10;
 let MIN_WITHDRAWAL_AMOUNT = 0.5;
 let MAX_BALANCE_BUFFER    = 0.1;
 let BAMBOO_TO_TON_RATE    = 10000;
+let DAILY_LIMIT           = 2;    // الحد الأقصى للسحوبات اليومية لكل مستخدم
+let DAILY_COOLDOWN_HOURS  = 24;   // ساعات الانتظار بعد تجاوز الحد اليومي
 let systemPaused          = false;
 
 // ==========================
@@ -342,12 +352,46 @@ async function validateWithdrawal(withdrawId, data) {
   const userId        = data.userId || null;
   const wdId          = data.wdId   || withdrawId;
 
-  // تحقق من العنوان
-  if (!data.address.startsWith("EQ") && !data.address.startsWith("UQ")) {
-    await db.ref(`withdrawQueue/${withdrawId}`).update({ status: "failed", error: "Invalid TON address", updatedAt: Date.now() });
-    if (userId && wdId) await db.ref(`users/${userId}/wdHistory/${wdId}`).update({ status: "failed", updatedAt: Date.now() });
+  // تحقق من العنوان — فحص شامل
+  const addr = String(data.address || '').trim();
+  // العنوان الصحيح: يبدأ بـ EQ أو UQ، طوله بين 48-50 حرف، بدون مسافات أو تكرار
+  const validPrefix = addr.startsWith("EQ") || addr.startsWith("UQ");
+  const validLength = addr.length >= 48 && addr.length <= 52;
+  // اكتشاف التكرار: لو العنوان بيحتوي على EQ أو UQ في المنتصف = عنوانين ملصقين
+  const duplicated  = (addr.indexOf("EQ", 2) !== -1 || addr.indexOf("UQ", 2) !== -1);
+  const hasSpaces   = /\s/.test(addr);
+
+  if (!validPrefix || !validLength || duplicated || hasSpaces) {
+    const reason = duplicated  ? "Duplicated address — two addresses merged" :
+                   !validPrefix ? "Invalid TON address prefix" :
+                   !validLength ? `Invalid address length (${addr.length})` :
+                                  "Address contains spaces";
+    console.log(`❌ Invalid address for ${withdrawId}: ${reason} | addr: ${addr.substring(0, 20)}...`);
+    await db.ref(`withdrawQueue/${withdrawId}`).update({
+      status: "cancelled", error: reason, updatedAt: Date.now()
+    });
+    if (userId && wdId) await db.ref(`users/${userId}/wdHistory/${wdId}`).update({ status: "cancelled", updatedAt: Date.now() });
+    // إشعار الأدمن بالعنوان الفاسد
+    if (botInstance) {
+      await botInstance.sendMessage(ADMIN_CHAT_ID,
+        `⚠️ <b>عنوان محفظة فاسد — تم إلغاء الطلب</b>
+
+` +
+        `🆔 ID: <code>${withdrawId}</code>
+` +
+        `👤 User: <code>${userId || '?'}</code>
+` +
+        `❌ السبب: ${reason}
+` +
+        `📬 العنوان:
+<code>${addr.substring(0, 80)}</code>`,
+        { parse_mode: 'HTML' }
+      ).catch(() => {});
+    }
     return { valid: false, skip: true };
   }
+  // استخدم العنوان المنظّف
+  data.address = addr;
 
   // فحص حظر المستخدم
   if (userId && await isUserBanned(userId)) {
@@ -368,15 +412,21 @@ async function validateWithdrawal(withdrawId, data) {
     return { valid: false, skip: false }; // تجاهل مؤقتاً فقط
   }
 
-  // فحص الحد اليومي
+  // فحص الحد اليومي — انتظار 24 ساعة بدون طلب موافقة
   if (userId) {
     const dailyCount = await getUserDailyWithdrawalCount(userId);
-    if (dailyCount > 2) {
+    if (dailyCount >= DAILY_LIMIT) {
+      // احسب متى يحق للمستخدم السحب مرة أخرى
+      const cooldownMs  = DAILY_COOLDOWN_HOURS * 60 * 60 * 1000;
+      const unlockTime  = (data.ts || Date.now()) + cooldownMs;
+      const unlockStr   = new Date(unlockTime).toLocaleString('en-GB', { timeZone: 'UTC', hour12: false });
       await db.ref(`withdrawQueue/${withdrawId}`).update({
-        status: "awaiting_approval", updatedAt: Date.now(),
-        holdReason: `تجاوز الحد اليومي — ${dailyCount} سحوبات اليوم`,
+        status:    "awaiting_approval",
+        updatedAt: Date.now(),
+        holdReason: `تجاوز الحد اليومي (${dailyCount}/${DAILY_LIMIT}) — سيُدفع تلقائياً بعد ${DAILY_COOLDOWN_HOURS}ساعة`,
+        unlockAt:  unlockTime,
       });
-      if (botInstance) await sendAdminApprovalRequest(botInstance, withdrawId, data, dailyCount);
+      console.log(`⏳ Daily limit — ${withdrawId} queued until ${unlockStr} UTC`);
       return { valid: false, skip: false };
     }
   }
@@ -562,6 +612,100 @@ async function sendBatchTransfer(items, attempt = 0) {
 }
 
 // ==========================
+// 🔹 إرسال سحب واحد (Single mode)
+// ==========================
+async function sendSingleTransfer(item, attempt = 0) {
+  const MAX_SINGLE_RETRIES = 3;
+  console.log(`
+${'─'.repeat(40)}`);
+  console.log(`💸 SINGLE TRANSFER | ${item.id} | ${item.roundedAmount} TON → ${item.data.address.substring(0,10)}...`);
+
+  const balanceCheck = await checkSufficientBalance(item.roundedAmount);
+  if (!balanceCheck.sufficient) {
+    processingQueue.delete(item.id);
+    await db.ref(`withdrawQueue/${item.id}`).update({
+      status: "pending", updatedAt: Date.now(),
+      lastError: `Insufficient balance: ${balanceCheck.balance.toFixed(3)} TON`,
+    }).catch(() => {});
+    return { success: false, reason: 'insufficient_balance' };
+  }
+
+  try {
+    const { contract, key } = await getWallet();
+    const seqno = await contract.getSeqno();
+
+    await new Promise(r => setTimeout(r, 1000));
+    await contract.sendTransfer({
+      secretKey: key.secretKey,
+      seqno,
+      messages: [internal({ to: item.data.address, value: toNano(item.roundedAmount.toFixed(3)), bounce: false })]
+    });
+    console.log(`📤 Single submitted — seqno: ${seqno} | attempt: ${attempt + 1}`);
+
+    const confirmation = await confirmBatchTransaction(seqno, 90000);
+    if (!confirmation.confirmed) {
+      console.log(`⚠️ Single TIMEOUT — seqno ${seqno}`);
+      await db.ref(`withdrawQueue/${item.id}`).update({
+        status: "needs_review", updatedAt: Date.now(),
+        lastError: `Single timeout — seqno ${seqno} — verify manually`,
+      }).catch(() => {});
+      processingQueue.delete(item.id);
+      if (botInstance) {
+        await botInstance.sendMessage(ADMIN_CHAT_ID,
+          `⚠️ <b>Single Timeout</b>\n\n<code>${item.id}</code>\nSeqno: <code>${seqno}</code>\nراجع يدوياً`,
+          { parse_mode: 'HTML' }
+        ).catch(() => {});
+      }
+      return { success: false, reason: 'timeout' };
+    }
+
+    // جيب الـ hash
+    let txHash = null;
+    try {
+      const txRes  = await fetch(`https://toncenter.com/api/v2/getTransactions?address=${walletAddress}&limit=3`,
+        { headers: { "X-API-Key": process.env.TON_API_KEY } });
+      const txData = await txRes.json();
+      txHash = txData.result?.[0]?.transaction_id?.hash || null;
+    } catch(e) {}
+
+    await db.ref(`withdrawQueue/${item.id}`).update({
+      status: "paid", updatedAt: Date.now(), completedAt: Date.now(),
+      txHash: txHash || null, sentAmount: item.roundedAmount, batchSize: 1,
+    });
+    await updateUserWdHistory(item.userId, item.wdId, txHash, item.roundedAmount);
+    processingQueue.delete(item.id);
+    console.log(`✅ Single paid: ${item.id} | hash: ${txHash ? txHash.substring(0,12)+'...' : 'N/A'}`);
+
+    // إشعار المستخدم مع retry
+    const sent = await sendUserNotification(item.userId, item.roundedAmount, item.amountCoins, txHash);
+    if (!sent) {
+      await new Promise(r => setTimeout(r, 2000));
+      await sendUserNotification(item.userId, item.roundedAmount, item.amountCoins, txHash);
+    }
+    await sendChannelNotification([item], txHash).catch(() => {});
+    return { success: true, txHash };
+
+  } catch (error) {
+    const msg = error.message;
+    console.log(`❌ Single attempt ${attempt + 1} failed: ${msg}`);
+    const isNetwork = msg.includes('500') || msg.toLowerCase().includes('timeout') || msg.toLowerCase().includes('network');
+    if (isNetwork && attempt < MAX_SINGLE_RETRIES) {
+      const waitSec = 15 * (attempt + 1);
+      console.log(`🔁 Retrying single in ${waitSec}s`);
+      await new Promise(r => setTimeout(r, waitSec * 1000));
+      return sendSingleTransfer(item, attempt + 1);
+    }
+    await db.ref(`withdrawQueue/${item.id}`).update({
+      status: "pending", updatedAt: Date.now(),
+      lastError: `Single failed (${attempt + 1}): ${msg}`,
+      attempts: (item.data.attempts || 0) + 1,
+    }).catch(() => {});
+    processingQueue.delete(item.id);
+    return { success: false, reason: 'error', error: msg };
+  }
+}
+
+// ==========================
 // 🔹 معالجة السحوبات المعلقة — نظام Batch الجديد
 // ==========================
 async function processPendingWithdrawals() {
@@ -570,6 +714,10 @@ async function processPendingWithdrawals() {
 
   try {
     isProcessing = true;
+
+    // ─── أولاً: افتح الطلبات التي انتهت مدة الانتظار (24h) ──
+    await unlockExpiredDailyLimits();
+
     const snapshot    = await db.ref("withdrawQueue").orderByChild("status").equalTo("pending").once("value");
     const withdrawals = snapshot.val();
     if (!withdrawals) { console.log("📭 No pending withdrawals"); isProcessing = false; return; }
@@ -581,7 +729,8 @@ async function processPendingWithdrawals() {
 
     if (!list.length) { console.log("📭 All pending already in processingQueue"); isProcessing = false; return; }
 
-    console.log(`\n📋 ${list.length} pending withdrawals — building batches (size: ${BATCH_SIZE})...`);
+    const mode = PROCESSING_MODE;
+    console.log(`\n📋 ${list.length} pending | Mode: ${mode.toUpperCase()} | BatchSize: ${BATCH_SIZE}`);
 
     // ─── المرحلة 1: التحقق من كل السحوبات ──────────────
     const validItems = [];
@@ -590,11 +739,7 @@ async function processPendingWithdrawals() {
       const validation = await validateWithdrawal(id, data);
 
       if (!validation.valid) {
-        if (validation.skip) {
-          processingQueue.delete(id);
-        } else {
-          processingQueue.delete(id); // مش valid لكن مش skip — تُعالج لاحقاً
-        }
+        processingQueue.delete(id);
         continue;
       }
 
@@ -613,12 +758,11 @@ async function processPendingWithdrawals() {
       }
 
       validItems.push({
-        id,
-        data,
+        id, data,
         roundedAmount: validation.roundedAmount,
-        userId:       validation.userId,
-        wdId:         validation.wdId,
-        amountCoins:  data.amt || 0,
+        userId:        validation.userId,
+        wdId:          validation.wdId,
+        amountCoins:   data.amt || 0,
       });
     }
 
@@ -628,21 +772,32 @@ async function processPendingWithdrawals() {
       return;
     }
 
-    // ─── المرحلة 2: تقسيم لدفعات وإرسال ─────────────
     const totalTON = validItems.reduce((s, i) => s + i.roundedAmount, 0);
-    const batchCount = Math.ceil(validItems.length / BATCH_SIZE);
-    console.log(`\n🚀 Sending ${validItems.length} items in ${batchCount} batch(es) | Total: ${totalTON.toFixed(4)} TON`);
 
-    for (let b = 0; b < batchCount; b++) {
-      const batch = validItems.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
-      console.log(`\n▶️ Sending batch ${b + 1}/${batchCount} (${batch.length} items)...`);
-
-      await sendBatchTransfer(batch);
-
-      // تأخير بين الدفعات
-      if (b < batchCount - 1) {
-        console.log(`⏳ Waiting ${BATCH_BETWEEN_DELAY / 1000}s before next batch...`);
-        await new Promise(r => setTimeout(r, BATCH_BETWEEN_DELAY));
+    // ─── المرحلة 2: إرسال حسب الوضع ──────────────────
+    if (mode === 'batch') {
+      // ── Batch mode ──
+      const batchCount = Math.ceil(validItems.length / BATCH_SIZE);
+      console.log(`\n🚀 BATCH | ${validItems.length} items → ${batchCount} batch(es) | ${totalTON.toFixed(4)} TON`);
+      for (let b = 0; b < batchCount; b++) {
+        const batch = validItems.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
+        console.log(`\n▶️ Batch ${b + 1}/${batchCount} (${batch.length} items)...`);
+        await sendBatchTransfer(batch);
+        if (b < batchCount - 1) {
+          console.log(`⏳ Waiting ${BATCH_BETWEEN_DELAY / 1000}s...`);
+          await new Promise(r => setTimeout(r, BATCH_BETWEEN_DELAY));
+        }
+      }
+    } else {
+      // ── Single mode ──
+      console.log(`\n🚀 SINGLE | ${validItems.length} items | ${totalTON.toFixed(4)} TON | delay: ${SINGLE_DELAY_MS/1000}s`);
+      for (let i = 0; i < validItems.length; i++) {
+        if (systemPaused) { console.log("⏸ Paused mid-single — stopping"); break; }
+        console.log(`\n▶️ Single ${i + 1}/${validItems.length}: ${validItems[i].id}`);
+        await sendSingleTransfer(validItems[i]);
+        if (i < validItems.length - 1) {
+          await new Promise(r => setTimeout(r, SINGLE_DELAY_MS));
+        }
       }
     }
 
@@ -652,6 +807,32 @@ async function processPendingWithdrawals() {
     isProcessing = false;
     console.log("✅ processPendingWithdrawals cycle done");
   }
+}
+
+// ==========================
+// 🔹 فتح الطلبات المعلقة التي انتهت مدة الانتظار
+// ==========================
+async function unlockExpiredDailyLimits() {
+  try {
+    const snap  = await db.ref("withdrawQueue").orderByChild("status").equalTo("awaiting_approval").once("value");
+    const items = snap.val();
+    if (!items) return;
+    const now = Date.now();
+    let unlocked = 0;
+    for (const [id, d] of Object.entries(items)) {
+      // فقط الطلبات التي تجاوزت وقت الفتح (unlockAt)
+      if (d.unlockAt && now >= d.unlockAt) {
+        await db.ref(`withdrawQueue/${id}`).update({
+          status: "pending", updatedAt: now,
+          holdReason: null, unlockAt: null,
+          lastError: null,
+        });
+        unlocked++;
+        console.log(`🔓 Unlocked daily-limit withdrawal: ${id}`);
+      }
+    }
+    if (unlocked > 0) console.log(`🔓 Unlocked ${unlocked} daily-limit withdrawals`);
+  } catch (e) { console.log(`❌ unlockExpiredDailyLimits: ${e.message}`); }
 }
 
 // ==========================
@@ -688,30 +869,46 @@ function startWelcomeBot() {
   bot.onText(/\/help/, async (msg) => {
     if (!isAdmin(msg)) return;
     await adminReply(bot, msg.chat.id,
-      `🐼 <b>Panda Bamboo — Admin Commands</b>\n` +
-      `${'─'.repeat(30)}\n\n` +
+      `🐼 <b>Panda Bamboo — لوحة الأدمن</b>\n` +
+      `${'═'.repeat(32)}\n\n` +
 
       `📊 <b>المعلومات والمراقبة</b>\n` +
-      `/balance — رصيد المحفظة\n` +
-      `/queue — عدد السحوبات في الانتظار\n` +
-      `/pending_reasons — تفاصيل المعلقة\n` +
-      `/stats — إحصائيات عامة\n\n` +
+      `/balance — رصيد محفظة TON\n` +
+      `/queue — قائمة الانتظار\n` +
+      `/pending_reasons — تفاصيل المعلقة مع الأسباب\n` +
+      `/stats — إحصائيات كاملة\n` +
+      `/mode — الوضع الحالي (Batch/Single)\n\n` +
 
-      `⚙️ <b>الإعدادات</b>\n` +
-      `/setmax [رقم] — الحد الأقصى للسحب (TON)\n` +
-      `/setmin [رقم] — الحد الأدنى للسحب (TON)\n` +
-      `/setrate [رقم] — سعر التحويل Bamboo→TON\n\n` +
+      `⚙️ <b>إعدادات السحب</b>\n` +
+      `/setmax [TON] — الحد الأقصى للسحب\n` +
+      `/setmin [TON] — الحد الأدنى للسحب\n` +
+      `/setrate [رقم] — سعر Bamboo→TON\n` +
+      `/setdaily [رقم] — الحد اليومي للمستخدم\n` +
+      `/setcooldown [ساعات] — مدة الانتظار بعد تجاوز الحد\n\n` +
 
-      `📦 <b>إعدادات Batch</b>\n` +
-      `/batchstatus — حالة نظام Batch\n\n` +
+      `📦 <b>نظام المعالجة</b>\n` +
+      `/setmode batch — تفعيل نظام الباتش\n` +
+      `/setmode single — تفعيل النظام الفردي\n` +
+      `/setbatchsize [رقم] — حجم الدفعة (1-4)\n` +
+      `/setsingledelay [ثواني] — التأخير بين كل سحب في Single\n` +
+      `/batchstatus — حالة نظام المعالجة\n\n` +
 
       `🔧 <b>التحكم</b>\n` +
       `/process — تشغيل المعالجة يدوياً\n` +
       `/pause — إيقاف المعالجة\n` +
-      `/resume — استئناف المعالجة\n\n` +
+      `/resume — استئناف المعالجة\n` +
+      `/clearqueue — إلغاء جميع السحوبات المعلقة\n` +
+      `/retryall — إعادة محاولة السحوبات الفاشلة\n\n` +
+
+      `👤 <b>إدارة المستخدمين</b>\n` +
+      `/banuser [userId] — حظر مستخدم\n` +
+      `/unbanuser [userId] — رفع حظر مستخدم\n` +
+      `/banwallet [address] — حظر محفظة\n` +
+      `/unwallet [address] — رفع حظر محفظة\n` +
+      `/userinfo [userId] — معلومات مستخدم\n\n` +
 
       `🕵️ <b>كشف التلاعب</b>\n` +
-      `/check_suspicious — كشف محافظ مشتركة بين +3 مستخدمين\n` +
+      `/check_suspicious — كشف محافظ مشتركة (+3 مستخدمين)\n` +
       `/reject_suspicious — رفض وحظر جميع المشبوهين\n`
     );
   });
@@ -742,18 +939,46 @@ function startWelcomeBot() {
     } catch (e) { await adminReply(bot, msg.chat.id, `❌ ${e.message}`); }
   });
 
+  // ─── /mode ────────────────────────────────────────────
+  bot.onText(/\/mode/, async (msg) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const modeIcon = PROCESSING_MODE === 'batch' ? '📦' : '💸';
+    await adminReply(bot, msg.chat.id,
+      `${modeIcon} <b>وضع المعالجة الحالي: ${PROCESSING_MODE.toUpperCase()}</b>\n\n` +
+      (PROCESSING_MODE === 'batch'
+        ? `📦 Batch: يجمع حتى <b>${BATCH_SIZE}</b> سحوبات في معاملة واحدة\n⏳ تأخير بين الدفعات: <b>${BATCH_BETWEEN_DELAY/1000}s</b>`
+        : `💸 Single: يرسل كل سحب منفرداً\n⏳ تأخير بين كل سحب: <b>${SINGLE_DELAY_MS/1000}s</b>`) +
+      `\n\n🔄 Processing: <b>${isProcessing ? '✅ يعمل' : '⏹ متوقف'}</b>` +
+      `\n⏸ Paused: <b>${systemPaused ? 'نعم ⏸' : 'لا ✅'}</b>` +
+      `\n🔒 في القائمة: <b>${processingQueue.size}</b>`
+    );
+  });
+
   // ─── /batchstatus ─────────────────────────────────────
   bot.onText(/\/batchstatus/, async (msg) => {
     if (!isAdmin(msg)) { await unauth(msg); return; }
-    await adminReply(bot, msg.chat.id,
-      `📦 <b>Batch System Status</b>\n\n` +
-      `🔢 Batch size: <b>${BATCH_SIZE}</b> items/batch\n` +
-      `⏱ Flush interval: <b>${BATCH_FLUSH_SECONDS}s</b>\n` +
-      `⏳ Between batches: <b>${BATCH_BETWEEN_DELAY / 1000}s</b>\n` +
-      `🔄 Currently processing: <b>${isProcessing ? 'Yes' : 'No'}</b>\n` +
-      `⏸ System paused: <b>${systemPaused ? 'Yes ⏸' : 'No ✅'}</b>\n` +
-      `🔒 In processingQueue: <b>${processingQueue.size}</b>`
-    );
+    try {
+      const snapP = await db.ref("withdrawQueue").orderByChild("status").equalTo("pending").once("value");
+      const snapA = await db.ref("withdrawQueue").orderByChild("status").equalTo("awaiting_approval").once("value");
+      const pendingCount  = snapP.exists() ? Object.keys(snapP.val()).length : 0;
+      const approvalCount = snapA.exists() ? Object.keys(snapA.val()).length : 0;
+      const modeIcon = PROCESSING_MODE === 'batch' ? '📦' : '💸';
+      await adminReply(bot, msg.chat.id,
+        `${modeIcon} <b>حالة نظام المعالجة</b>\n\n` +
+        `🔀 الوضع: <b>${PROCESSING_MODE.toUpperCase()}</b>\n` +
+        `🔢 حجم الدفعة: <b>${BATCH_SIZE}</b>\n` +
+        `⏱ Flush كل: <b>${BATCH_FLUSH_SECONDS}s</b>\n` +
+        `⏳ تأخير بين دفعات: <b>${BATCH_BETWEEN_DELAY/1000}s</b>\n` +
+        `💸 تأخير Single: <b>${SINGLE_DELAY_MS/1000}s</b>\n\n` +
+        `📋 Pending: <b>${pendingCount}</b>\n` +
+        `⏳ Awaiting approval: <b>${approvalCount}</b>\n` +
+        `🔄 Processing now: <b>${isProcessing ? 'نعم' : 'لا'}</b>\n` +
+        `⏸ Paused: <b>${systemPaused ? 'نعم ⏸' : 'لا ✅'}</b>\n` +
+        `🔒 In processingQueue: <b>${processingQueue.size}</b>\n\n` +
+        `📅 الحد اليومي: <b>${DAILY_LIMIT}</b> سحوبات\n` +
+        `⏰ Cooldown: <b>${DAILY_COOLDOWN_HOURS}</b> ساعة`
+      );
+    } catch(e) { await adminReply(bot, msg.chat.id, `❌ ${e.message}`); }
   });
 
   // ─── /stats ───────────────────────────────────────────
@@ -769,18 +994,24 @@ function startWelcomeBot() {
         if (d.status === 'paid') totalPaid += roundAmount(d.ton);
       });
       const bal = await getWalletBalance();
+      const modeIcon = PROCESSING_MODE === 'batch' ? '📦' : '💸';
       await adminReply(bot, msg.chat.id,
-        `📊 <b>Stats</b>\n\n` +
-        `✅ Paid: <b>${counts.paid}</b> (${totalPaid.toFixed(3)} TON)\n` +
+        `📊 <b>إحصائيات الوضع الحالي</b>\n\n` +
+        `✅ مدفوعة: <b>${counts.paid}</b> (${totalPaid.toFixed(3)} TON)\n` +
         `⏳ Pending: <b>${counts.pending}</b>\n` +
         `🔄 Processing: <b>${counts.processing}</b>\n` +
-        `⏸ Awaiting approval: <b>${counts.awaiting_approval}</b>\n` +
+        `⏸ Awaiting (daily): <b>${counts.awaiting_approval}</b>\n` +
         `🔴 Bounced: <b>${counts.bounced}</b>\n` +
         `❌ Failed: <b>${counts.failed}</b>\n` +
         `🔍 Needs review: <b>${counts.needs_review}</b>\n` +
         `🚫 Cancelled: <b>${counts.cancelled}</b>\n\n` +
-        `💰 Wallet balance: <b>${bal.toFixed(4)} TON</b>\n\n` +
-        `⚙️ Max: ${MAX_WITHDRAWAL_AMOUNT} | Min: ${MIN_WITHDRAWAL_AMOUNT} | Rate: ${BAMBOO_TO_TON_RATE}`
+        `💰 رصيد المحفظة: <b>${bal.toFixed(4)} TON</b>\n\n` +
+        `${'─'.repeat(28)}\n` +
+        `${modeIcon} الوضع: <b>${PROCESSING_MODE.toUpperCase()}</b> | حجم الدفعة: <b>${BATCH_SIZE}</b>\n` +
+        `📈 Max: <b>${MAX_WITHDRAWAL_AMOUNT}</b> | Min: <b>${MIN_WITHDRAWAL_AMOUNT}</b> TON\n` +
+        `📅 الحد اليومي: <b>${DAILY_LIMIT}</b> سحوبات | Cooldown: <b>${DAILY_COOLDOWN_HOURS}h</b>\n` +
+        `💱 Rate: <b>1 TON = ${BAMBOO_TO_TON_RATE} Bamboo</b>\n` +
+        `⏸ Paused: <b>${systemPaused ? 'نعم' : 'لا'}</b>`
       );
     } catch (e) { await adminReply(bot, msg.chat.id, `❌ ${e.message}`); }
   });
@@ -812,6 +1043,164 @@ function startWelcomeBot() {
     if (isNaN(v) || v <= 0) { await adminReply(bot, msg.chat.id, "❌ رقم غير صحيح"); return; }
     BAMBOO_TO_TON_RATE = v;
     await adminReply(bot, msg.chat.id, `✅ السعر: <b>1 TON = ${v} Bamboo</b>`);
+  });
+
+  // ─── /setdaily ────────────────────────────────────────
+  bot.onText(/\/setdaily (.+)/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const v = parseInt(match[1]);
+    if (isNaN(v) || v < 1) { await adminReply(bot, msg.chat.id, "❌ رقم غير صحيح (1 على الأقل)"); return; }
+    DAILY_LIMIT = v;
+    await adminReply(bot, msg.chat.id, `✅ الحد اليومي: <b>${v}</b> سحوبات لكل مستخدم`);
+  });
+
+  // ─── /setcooldown ─────────────────────────────────────
+  bot.onText(/\/setcooldown (.+)/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const v = parseFloat(match[1]);
+    if (isNaN(v) || v <= 0) { await adminReply(bot, msg.chat.id, "❌ رقم غير صحيح"); return; }
+    DAILY_COOLDOWN_HOURS = v;
+    await adminReply(bot, msg.chat.id, `✅ مدة الانتظار: <b>${v}</b> ساعة بعد تجاوز الحد اليومي`);
+  });
+
+  // ─── /setmode ─────────────────────────────────────────
+  bot.onText(/\/setmode (.+)/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const m = match[1].trim().toLowerCase();
+    if (m !== 'batch' && m !== 'single') {
+      await adminReply(bot, msg.chat.id, "❌ الوضع يجب أن يكون: <b>batch</b> أو <b>single</b>"); return;
+    }
+    PROCESSING_MODE = m;
+    const icon = m === 'batch' ? '📦' : '💸';
+    await adminReply(bot, msg.chat.id,
+      `${icon} تم التبديل إلى وضع <b>${m.toUpperCase()}</b>\n\n` +
+      (m === 'batch'
+        ? `يجمع حتى <b>${BATCH_SIZE}</b> سحوبات في معاملة واحدة`
+        : `يرسل كل سحب منفرداً بتأخير <b>${SINGLE_DELAY_MS/1000}s</b>`)
+    );
+  });
+
+  // ─── /setbatchsize ────────────────────────────────────
+  bot.onText(/\/setbatchsize (.+)/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const v = parseInt(match[1]);
+    if (isNaN(v) || v < 1 || v > 4) {
+      await adminReply(bot, msg.chat.id, "❌ حجم الدفعة يجب أن يكون بين 1 و4 (حد TON للمعاملة الواحدة)"); return;
+    }
+    BATCH_SIZE = v;
+    await adminReply(bot, msg.chat.id, `✅ حجم الدفعة: <b>${v}</b> سحوبات في المعاملة الواحدة`);
+  });
+
+  // ─── /setsingledelay ──────────────────────────────────
+  bot.onText(/\/setsingledelay (.+)/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const v = parseFloat(match[1]);
+    if (isNaN(v) || v < 1) { await adminReply(bot, msg.chat.id, "❌ رقم غير صحيح (ثانية واحدة على الأقل)"); return; }
+    SINGLE_DELAY_MS = v * 1000;
+    await adminReply(bot, msg.chat.id, `✅ تأخير Single: <b>${v}</b> ثانية بين كل سحب`);
+  });
+
+  // ─── /clearqueue ──────────────────────────────────────
+  bot.onText(/\/clearqueue/, async (msg) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    try {
+      const snap  = await db.ref("withdrawQueue").orderByChild("status").equalTo("pending").once("value");
+      const items = snap.val();
+      if (!items) { await adminReply(bot, msg.chat.id, "📭 لا توجد سحوبات pending"); return; }
+      const count = Object.keys(items).length;
+      const updates = {};
+      Object.keys(items).forEach(id => { updates[`${id}/status`] = "cancelled"; updates[`${id}/updatedAt`] = Date.now(); updates[`${id}/holdReason`] = "إلغاء جماعي من الأدمن"; });
+      await db.ref("withdrawQueue").update(updates);
+      await adminReply(bot, msg.chat.id, `🗑 تم إلغاء <b>${count}</b> سحب من القائمة`);
+    } catch(e) { await adminReply(bot, msg.chat.id, `❌ ${e.message}`); }
+  });
+
+  // ─── /retryall ────────────────────────────────────────
+  bot.onText(/\/retryall/, async (msg) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    try {
+      const snap  = await db.ref("withdrawQueue").orderByChild("status").equalTo("failed").once("value");
+      const items = snap.val();
+      if (!items) { await adminReply(bot, msg.chat.id, "📭 لا توجد سحوبات failed"); return; }
+      const count = Object.keys(items).length;
+      const updates = {};
+      Object.keys(items).forEach(id => { updates[`${id}/status`] = "pending"; updates[`${id}/updatedAt`] = Date.now(); updates[`${id}/lastError`] = null; updates[`${id}/attempts`] = 0; });
+      await db.ref("withdrawQueue").update(updates);
+      await adminReply(bot, msg.chat.id, `🔄 تمت إعادة <b>${count}</b> سحب فاشل للمعالجة`);
+      setTimeout(() => processPendingWithdrawals(), 1000);
+    } catch(e) { await adminReply(bot, msg.chat.id, `❌ ${e.message}`); }
+  });
+
+  // ─── /banuser ─────────────────────────────────────────
+  bot.onText(/\/banuser (.+)/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const userId = match[1].trim();
+    await db.ref(`bannedUsers/${userId}`).set({ bannedAt: Date.now(), by: 'admin' });
+    await adminReply(bot, msg.chat.id, `🚫 تم حظر المستخدم <code>${userId}</code>`);
+  });
+
+  // ─── /unbanuser ───────────────────────────────────────
+  bot.onText(/\/unbanuser (.+)/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const userId = match[1].trim();
+    await db.ref(`bannedUsers/${userId}`).remove();
+    await adminReply(bot, msg.chat.id, `✅ تم رفع حظر المستخدم <code>${userId}</code>`);
+  });
+
+  // ─── /banwallet ───────────────────────────────────────
+  bot.onText(/\/banwallet (.+)/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const addr = match[1].trim();
+    const key  = addr.replace(/[.$#[\]/]/g, '_');
+    await db.ref(`bannedWallets/${key}`).set({ address: addr, bannedAt: Date.now(), reason: 'يدوي من الأدمن' });
+    await adminReply(bot, msg.chat.id, `🚫 تم حظر المحفظة:\n<code>${addr}</code>`);
+  });
+
+  // ─── /unwallet ────────────────────────────────────────
+  bot.onText(/\/unwallet (.+)/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const addr = match[1].trim();
+    const key  = addr.replace(/[.$#[\]/]/g, '_');
+    await db.ref(`bannedWallets/${key}`).remove();
+    await adminReply(bot, msg.chat.id, `✅ تم رفع حظر المحفظة:\n<code>${addr}</code>`);
+  });
+
+  // ─── /userinfo ────────────────────────────────────────
+  bot.onText(/\/userinfo (.+)/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const userId = match[1].trim();
+    try {
+      const [bannedSnap, wdSnap] = await Promise.all([
+        db.ref(`bannedUsers/${userId}`).once("value"),
+        db.ref("withdrawQueue").orderByChild("userId").equalTo(userId).once("value"),
+      ]);
+      const isBanned  = bannedSnap.exists();
+      const wdItems   = wdSnap.val() || {};
+      const allWds    = Object.values(wdItems);
+      const paid      = allWds.filter(d => d.status === 'paid');
+      const pending   = allWds.filter(d => ['pending','awaiting_approval','processing'].includes(d.status));
+      const cancelled = allWds.filter(d => d.status === 'cancelled');
+      const totalPaid = paid.reduce((s, d) => s + roundAmount(d.ton), 0);
+      const wallets   = [...new Set(allWds.map(d => d.address).filter(Boolean))];
+
+      let text =
+        `👤 <b>معلومات المستخدم</b>\n` +
+        `🆔 ID: <code>${userId}</code>\n` +
+        `🚫 محظور: <b>${isBanned ? 'نعم ❌' : 'لا ✅'}</b>\n\n` +
+        `📊 <b>السحوبات</b>\n` +
+        `✅ مدفوعة: <b>${paid.length}</b> (${totalPaid.toFixed(3)} TON)\n` +
+        `⏳ معلقة: <b>${pending.length}</b>\n` +
+        `🚫 ملغاة: <b>${cancelled.length}</b>\n\n` +
+        `📬 <b>المحافظ المستخدمة (${wallets.length})</b>\n`;
+      wallets.slice(0, 5).forEach(w => { text += `• <code>${w}</code>\n`; });
+      if (wallets.length > 5) text += `... و${wallets.length - 5} أخرى\n`;
+
+      const keyboard = [];
+      if (!isBanned) keyboard.push([{ text: "🚫 حظر المستخدم", callback_data: `ban_user:${userId}` }]);
+      else           keyboard.push([{ text: "✅ رفع الحظر", callback_data: `unban_user:${userId}` }]);
+
+      await adminReply(bot, msg.chat.id, text, { reply_markup: { inline_keyboard: keyboard } });
+    } catch(e) { await adminReply(bot, msg.chat.id, `❌ ${e.message}`); }
   });
 
   // ─── /pause & /resume ─────────────────────────────────
@@ -1023,6 +1412,21 @@ function startWelcomeBot() {
     const data   = query.data || '';
     const chatId = query.message.chat.id;
     const msgId  = query.message.message_id;
+
+    // ── حظر / رفع حظر مستخدم من /userinfo ──
+    if (data.startsWith('ban_user:')) {
+      const uid = data.replace('ban_user:', '').trim();
+      await db.ref(`bannedUsers/${uid}`).set({ bannedAt: Date.now(), by: 'admin' });
+      await bot.answerCallbackQuery(query.id, { text: `🚫 تم حظر ${uid}` });
+      await bot.editMessageReplyMarkup({ inline_keyboard: [[{ text: "✅ رفع الحظر", callback_data: `unban_user:${uid}` }]] }, { chat_id: chatId, message_id: msgId }).catch(() => {});
+    }
+
+    if (data.startsWith('unban_user:')) {
+      const uid = data.replace('unban_user:', '').trim();
+      await db.ref(`bannedUsers/${uid}`).remove();
+      await bot.answerCallbackQuery(query.id, { text: `✅ تم رفع حظر ${uid}` });
+      await bot.editMessageReplyMarkup({ inline_keyboard: [[{ text: "🚫 حظر المستخدم", callback_data: `ban_user:${uid}` }]] }, { chat_id: chatId, message_id: msgId }).catch(() => {});
+    }
 
     // ── إعادة معالجة ──
     if (data.startsWith('reprocess_wd:')) {
